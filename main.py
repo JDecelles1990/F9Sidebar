@@ -6,7 +6,7 @@ try:
 except ImportError:  # pragma: no cover - Windows only
     winreg = None
 
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 import qtawesome as qta
@@ -135,6 +135,41 @@ def main() -> int:
     act_switch.triggered.connect(sidebar.toggle_panel)
     menu.addAction(act_switch)
 
+    dock_menu = menu.addMenu("Dock Edge")
+    dock_group = QActionGroup(dock_menu)
+    dock_group.setExclusive(True)
+    dock_edge_actions = {}
+    for edge in ("right", "left", "top", "bottom"):
+        act_edge = QAction(edge.capitalize(), dock_menu)
+        act_edge.setCheckable(True)
+        act_edge.setChecked(sidebar.dock_edge == edge)
+        act_edge.triggered.connect(lambda _chk=False, e=edge: sidebar.set_dock_edge(e))
+        dock_group.addAction(act_edge)
+        dock_menu.addAction(act_edge)
+        dock_edge_actions[edge] = act_edge
+
+    def on_dock_edge_changed(edge: str):
+        act = dock_edge_actions.get(edge)
+        if act is not None:
+            act.blockSignals(True)
+            act.setChecked(True)
+            act.blockSignals(False)
+
+    sidebar.sig_dock_edge_changed.connect(on_dock_edge_changed)
+
+    act_appbar = QAction("AppBar Mode (Push Maximized Windows)", menu)
+    act_appbar.setCheckable(True)
+    act_appbar.setChecked(sidebar.appbar_enabled)
+    act_appbar.toggled.connect(sidebar.set_appbar_mode)
+
+    def on_appbar_toggled(enabled: bool):
+        act_appbar.blockSignals(True)
+        act_appbar.setChecked(enabled)
+        act_appbar.blockSignals(False)
+
+    sidebar.sig_appbar_toggled.connect(on_appbar_toggled)
+    menu.addAction(act_appbar)
+
     act_pause = QAction("Pause Global Hotkeys", menu)
     act_pause.setCheckable(True)
 
@@ -161,6 +196,7 @@ def main() -> int:
     act_quit = QAction("Quit F9Sidebar", menu)
 
     def quit_app():
+        hooks.unregister_appbar()
         hooks.unregister_all_hotkeys()
         tray.hide()
         app.quit()

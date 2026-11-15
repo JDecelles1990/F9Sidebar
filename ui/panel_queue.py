@@ -1,3 +1,4 @@
+import html
 from typing import Callable, Dict, List, Optional
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer
@@ -193,7 +194,7 @@ class ClipRowWidget(QWidget):
             )
         else:
             self.btn_send_notes.setToolTip(
-                "Send to Active Note (→) | Right-click to pick note tab"
+                "Send to Active Note (→) | Right-click to pick note tab (Ctrl+1..9)"
             )
         self.btn_send_notes.clicked.connect(
             lambda: on_send_notes(self.clip_data, self.btn_send_notes)
@@ -288,6 +289,9 @@ class PanelQueue(QWidget):
                 font-size: 12px;
                 spacing: 6px;
             }
+            QCheckBox:focus {
+                color: #89B4FA;
+            }
             QCheckBox::indicator {
                 width: 15px;
                 height: 15px;
@@ -295,7 +299,7 @@ class PanelQueue(QWidget):
                 border: 1px solid #363A4F;
                 background-color: #1E1E2E;
             }
-            QCheckBox::indicator:hover {
+            QCheckBox::indicator:hover, QCheckBox::indicator:focus {
                 border-color: #89B4FA;
             }
             QCheckBox::indicator:checked {
@@ -319,6 +323,9 @@ class PanelQueue(QWidget):
             QPushButton#ActionBtn:hover:enabled {
                 background-color: #363A4F;
                 border-color: #89B4FA;
+            }
+            QPushButton#ActionBtn:focus {
+                border: 1px solid #89B4FA;
             }
             QPushButton#ActionBtn:disabled {
                 color: #6C7086;
@@ -366,6 +373,9 @@ class PanelQueue(QWidget):
                 border-color: #89B4FA;
                 color: #1E1E2E;
             }
+            QPushButton#RowActionBtn:focus, QPushButton#RowDeleteBtn:focus {
+                border: 1px solid #89B4FA;
+            }
             QPushButton#RowDeleteBtn {
                 color: #A6ADC8;
             }
@@ -383,7 +393,7 @@ class PanelQueue(QWidget):
                 font-size: 12px;
                 font-weight: 600;
             }
-            QComboBox#JoinCombo:hover {
+            QComboBox#JoinCombo:hover, QComboBox#JoinCombo:focus {
                 border-color: #89B4FA;
             }
             QComboBox#JoinCombo::drop-down {
@@ -409,6 +419,9 @@ class PanelQueue(QWidget):
             QPushButton#PrimaryCopyBtn:hover:enabled {
                 background-color: #A6C8FF;
                 border-color: #A6C8FF;
+            }
+            QPushButton#PrimaryCopyBtn:focus {
+                border: 2px solid #CDD6F4;
             }
             QPushButton#PrimaryCopyBtn:disabled {
                 background-color: #2A2D3E;
@@ -728,13 +741,27 @@ class PanelQueue(QWidget):
             selected_tab = tabs[0]
 
         existing = selected_tab.get("content") or ""
+        existing_rich = (selected_tab.get("rich_content") or "").strip()
         if existing.strip():
             separator = "" if existing.endswith("\n") else "\n"
             updated = f"{existing}{separator}{content}"
         else:
             updated = content
 
-        self.db.update_note_content(int(selected_tab["id"]), updated)
+        updated_rich = ""
+        if existing_rich:
+            escaped_block = f"<p>{html.escape(content).replace(chr(10), '<br/>')}</p>"
+            body_end = existing_rich.lower().rfind("</body>")
+            if body_end != -1:
+                updated_rich = (
+                    existing_rich[:body_end] + escaped_block + existing_rich[body_end:]
+                )
+            else:
+                updated_rich = existing_rich + escaped_block
+
+        self.db.update_note_content(
+            int(selected_tab["id"]), updated, rich_content=updated_rich
+        )
 
         if hub is not None and hasattr(hub, "refresh"):
             hub.refresh(self.current_query)
@@ -792,6 +819,17 @@ class PanelQueue(QWidget):
             btn.setText("✓")
             QTimer.singleShot(800, lambda: self._restore_send_button(btn))
 
+    @staticmethod
+    def _populate_note_tab_menu(menu: QMenu, tabs: List[Dict], prefix: str = "") -> Dict:
+        """Populate a QMenu with note tab actions labeled with Ctrl+1..9 shortcuts."""
+        tab_actions = {}
+        for idx, tab in enumerate(tabs):
+            tab_name = str(tab.get("tab_name", f"Tab {tab['id']}"))
+            shortcut_hint = f" (Ctrl+{idx + 1})" if idx < 9 else ""
+            act = menu.addAction(f"{prefix}{tab_name}{shortcut_hint}")
+            tab_actions[act] = int(tab["id"])
+        return tab_actions
+
     def _on_send_to_notes(self, clip_data: Dict, btn: QPushButton) -> None:
         content = str(clip_data.get("content", ""))
         source_type = str(clip_data.get("source_type", "text"))
@@ -809,9 +847,7 @@ class PanelQueue(QWidget):
                 if tabs:
                     sub = menu.addMenu("Send to Note Tab")
                     sub.setStyleSheet(menu.styleSheet())
-                    for tab in tabs:
-                        act = sub.addAction(str(tab.get("tab_name", f"Tab {tab['id']}")))
-                        tab_actions[act] = int(tab["id"])
+                    tab_actions = self._populate_note_tab_menu(sub, tabs)
 
                 chosen = self._exec_menu(menu, btn.mapToGlobal(btn.rect().bottomLeft()))
                 if chosen is None:
@@ -843,10 +879,7 @@ class PanelQueue(QWidget):
         def _open_menu() -> None:
             menu = self._create_styled_menu(btn)
             tabs = self.db.get_note_tabs()
-            tab_actions = {}
-            for tab in tabs:
-                act = menu.addAction(f"Append to {tab.get('tab_name', 'Notes')}")
-                tab_actions[act] = int(tab["id"])
+            tab_actions = self._populate_note_tab_menu(menu, tabs, prefix="Append to ")
 
             act_shortcut = None
             act_shortcut_edit = None

@@ -19,6 +19,19 @@ def get_resource_path(relative_path: str) -> Path:
     return base_path / relative_path
 
 
+DEFAULT_NOTE_TABS = [
+    ("Scratchpad", "fa5s.sticky-note", ""),
+    ("Commands", "fa5s.terminal", ""),
+    ("Templates", "fa5s.file-alt", ""),
+    ("Tasks", "fa5s.check-square", ""),
+    ("Tickets & Logs", "fa5s.clipboard-list", ""),
+    ("Network & IPs", "fa5s.network-wired", ""),
+    ("Code & Scripts", "fa5s.code", ""),
+    ("KB & Links", "fa5s.bookmark", ""),
+    ("Ideas", "fa5s.lightbulb", ""),
+]
+
+
 class DatabaseManager:
     def __init__(self, profile: str = "work", base_dir: Optional[Path] = None):
         self.base_dir = base_dir or get_app_data_dir()
@@ -54,7 +67,9 @@ class DatabaseManager:
                     target TEXT NOT NULL,
                     category TEXT NOT NULL DEFAULT 'app',
                     icon_path TEXT DEFAULT '',
-                    sort_order INTEGER DEFAULT 0
+                    sort_order INTEGER DEFAULT 0,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    last_used_at TIMESTAMP
                 );
 
                 CREATE TABLE IF NOT EXISTS note_tabs (
@@ -62,7 +77,16 @@ class DatabaseManager:
                     tab_name TEXT NOT NULL,
                     icon_name TEXT NOT NULL DEFAULT 'fa5s.sticky-note',
                     content TEXT DEFAULT '',
+                    rich_content TEXT DEFAULT '',
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS note_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tab_id INTEGER NOT NULL,
+                    content TEXT DEFAULT '',
+                    rich_content TEXT DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
 
                 CREATE TABLE IF NOT EXISTS clip_queue (
@@ -75,18 +99,35 @@ class DatabaseManager:
                 );
                 """
             )
-            # Seed default vertical note tabs if empty
+            # Non-destructive column migrations for existing databases
+            note_cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(note_tabs)").fetchall()
+            }
+            if "rich_content" not in note_cols:
+                conn.execute(
+                    "ALTER TABLE note_tabs ADD COLUMN rich_content TEXT DEFAULT ''"
+                )
+
+            shortcut_cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(shortcuts)").fetchall()
+            }
+            if "use_count" not in shortcut_cols:
+                conn.execute(
+                    "ALTER TABLE shortcuts ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0"
+                )
+            if "last_used_at" not in shortcut_cols:
+                conn.execute(
+                    "ALTER TABLE shortcuts ADD COLUMN last_used_at TIMESTAMP"
+                )
+
+            # Seed or non-destructively upgrade vertical note tabs up to all 9 defaults
             count = conn.execute("SELECT COUNT(*) FROM note_tabs").fetchone()[0]
-            if count == 0:
-                default_tabs = [
-                    ("Scratchpad", "fa5s.sticky-note", ""),
-                    ("Commands", "fa5s.terminal", ""),
-                    ("Templates", "fa5s.file-alt", ""),
-                    ("Tasks", "fa5s.check-square", ""),
-                ]
+            if count < len(DEFAULT_NOTE_TABS):
                 conn.executemany(
                     "INSERT INTO note_tabs (tab_name, icon_name, content) VALUES (?, ?, ?)",
-                    default_tabs,
+                    DEFAULT_NOTE_TABS[count:],
                 )
 
     def _perform_daily_backup(self, max_backups: int = 5) -> None:
@@ -156,17 +197,24 @@ class DatabaseManager:
                 conn.execute("DELETE FROM clip_queue")
 
     # --- Panel 1: Shortcuts & Notes Helpers ---
-    def get_shortcuts(self, search_query: str = "") -> List[Dict]:
+    def get_shortcuts(
+        self, search_query: str = "", sort_by_usage: bool = False
+    ) -> List[Dict]:
+        order_clause = (
+            "use_count DESC, sort_order ASC, id ASC"
+            if sort_by_usage
+            else "sort_order ASC, id ASC"
+        )
         with self._connect() as conn:
             if search_query.strip():
                 q = f"%{search_query.strip()}%"
                 rows = conn.execute(
-                    "SELECT * FROM shortcuts WHERE title LIKE ? OR target LIKE ? ORDER BY sort_order ASC, id ASC",
+                    f"SELECT * FROM shortcuts WHERE title LIKE ? OR target LIKE ? ORDER BY {order_clause}",
                     (q, q),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM shortcuts ORDER BY sort_order ASC, id ASC"
+                    f"SELECT * FROM shortcuts ORDER BY {order_clause}"
                 ).fetchall()
             return [dict(r) for r in rows]
 
@@ -184,14 +232,109 @@ class DatabaseManager:
             )
             return cur.lastrowid
 
+    def increment_shortcut_usage(self, shortcut_id: int) -> None:
+        """Increment usage frequency counter and timestamp for a launched shortcut."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE shortcuts
+                SET use_count = COALESCE(use_count, 0) + 1,
+                    last_used_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (shortcut_id,),
+            )
+
+    def reorder_shortcuts(self, ordered_ids: List[int]) -> None:
+        """Persist explicit drag-and-drop shortcut ordering."""
+        with self._connect() as conn:
+            for order_idx, sid in enumerate(ordered_ids, start=1):
+                conn.execute(
+                    "UPDATE shortcuts SET sort_order = ? WHERE id = ?",
+                    (order_idx, int(sid)),
+                )
+
     def get_note_tabs(self) -> List[Dict]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM note_tabs ORDER BY id ASC").fetchall()
             return [dict(r) for r in rows]
 
-    def update_note_content(self, tab_id: int, content: str) -> None:
+    def update_note_content(
+        self, tab_id: int, content: str, rich_content: str = ""
+    ) -> None:
         with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT content, rich_content FROM note_tabs WHERE id = ?",
+                (tab_id,),
+            ).fetchone()
+            old_content = (existing["content"] or "") if existing else ""
+            old_rich = (existing["rich_content"] or "") if existing else ""
+
+            changed = old_content != content or old_rich != rich_content
+            if changed:
+                has_history = conn.execute(
+                    "SELECT 1 FROM note_history WHERE tab_id = ? LIMIT 1",
+                    (tab_id,),
+                ).fetchone()
+                if not has_history and (old_content or old_rich):
+                    conn.execute(
+                        "INSERT INTO note_history (tab_id, content, rich_content) VALUES (?, ?, ?)",
+                        (tab_id, old_content, old_rich),
+                    )
+                if content or rich_content or old_content or old_rich:
+                    conn.execute(
+                        "INSERT INTO note_history (tab_id, content, rich_content) VALUES (?, ?, ?)",
+                        (tab_id, content, rich_content),
+                    )
+                    conn.execute(
+                        """
+                        DELETE FROM note_history
+                        WHERE tab_id = ?
+                          AND id NOT IN (
+                              SELECT id FROM note_history
+                              WHERE tab_id = ?
+                              ORDER BY id DESC
+                              LIMIT 30
+                          )
+                        """,
+                        (tab_id, tab_id),
+                    )
+
             conn.execute(
-                "UPDATE note_tabs SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (content, tab_id),
+                """
+                UPDATE note_tabs
+                SET content = ?, rich_content = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (content, rich_content, tab_id),
             )
+
+    def get_note_history(self, tab_id: int) -> List[Dict]:
+        """Return saved note history snapshots for tab_id ordered newest-first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM note_history WHERE tab_id = ? ORDER BY id DESC",
+                (tab_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def restore_note_version(self, history_id: int) -> Optional[Dict]:
+        """Restore a note tab to a historical snapshot and return the updated tab."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM note_history WHERE id = ?",
+                (history_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            tab_id = int(row["tab_id"])
+            restored_content = row["content"] or ""
+            restored_rich = row["rich_content"] or ""
+
+        self.update_note_content(tab_id, restored_content, restored_rich)
+        with self._connect() as conn:
+            updated = conn.execute(
+                "SELECT * FROM note_tabs WHERE id = ?",
+                (tab_id,),
+            ).fetchone()
+            return dict(updated) if updated is not None else None

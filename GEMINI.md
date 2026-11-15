@@ -6,6 +6,8 @@ F9Sidebar is a frameless, multi-monitor Windows 11 system-tray overlay built wit
   - `F9`: Toggle sidebar visibility on the monitor currently holding the mouse cursor.
   - `Ctrl+F9`: Silently capture highlighted text, URLs, or file paths from any active window into Panel 2's checkable queue without interrupting focus.
   - `Shift+F9`: Switch between Panel 1 (Launcher & Notes Hub) and Panel 2 (Ctrl+F9 Clip Queue).
+- **Panel 1 Note Tab Shortcuts & Bottom Horizontal Tab Bar (`Ctrl+1`–`Ctrl+9`):**
+  - 9 canonical horizontal note tabs along the bottom bar: `Scratchpad` (`Ctrl+1`), `Commands` (`Ctrl+2`), `Templates` (`Ctrl+3`), `Tasks` (`Ctrl+4`), `Tickets & Logs` (`Ctrl+5`), `Network & IPs` (`Ctrl+6`), `Code & Scripts` (`Ctrl+7`), `KB & Links` (`Ctrl+8`), and `Ideas` (`Ctrl+9`).
 
 ## 2. Strict Coding & Framework Rules
 - **GUI Framework:** Strictly use `PySide6` (`QtCore`, `QtGui`, `QtWidgets`). NEVER import `PyQt5` or `PyQt6`.
@@ -29,12 +31,13 @@ C:\Dev\F9Sidebar\
 └── ui/
     ├── sidebar_window.py   # Frameless overlay, active-monitor slide animation, Omni-Bar header
     ├── toast_popup.py      # Non-activating Ctrl+F9 corner capture notification toast
-    ├── panel_hub.py        # Panel 1: 6-col Icon Grid (top) + Right-Edge Vertical-Tab Notes (bottom)
+    ├── button_fx.py        # App-wide hover gradient + blue/purple glow halo + press pulse for all buttons
+    ├── panel_hub.py        # Panel 1: 6-col Icon Grid (top) + Bottom Horizontal-Tab Notes (bottom)
     └── panel_queue.py      # Panel 2: Draggable Checkable Clip Queue + Batch Copy Bar
 
 ## 4. SQLite Schema (`work.db` & `personal.db`)
 - `shortcuts`: `id`, `title`, `target`, `category` ('app'|'folder'|'url'), `icon_path`, `sort_order`
-- `note_tabs`: `id`, `tab_name`, `icon_name`, `content`, `updated_at`
+- `note_tabs`: `id`, `tab_name`, `icon_name`, `content`, `updated_at` (seeded/non-destructively migrated to the 9 canonical tabs)
 - `clip_queue`: `id`, `content`, `source_type` ('text'|'url'|'path'), `is_checked`, `sort_order`, `created_at`
 
 ## 5. Packaging & Path Resolution Rules
