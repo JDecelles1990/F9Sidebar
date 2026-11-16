@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTextEdit,
@@ -2053,6 +2054,7 @@ class PanelHub(QWidget):
         self.active_tab_id: Optional[int] = None
         self._active_profile: str = getattr(self.db, "profile", "work")
         self._loading_note = False
+        self._restoring_state = False
         self._last_highlight_color = QColor("#F9E2AF")
         self._shortcut_buttons: Dict[int, QToolButton] = {}
         self._tab_buttons: Dict[int, tuple[QToolButton, str]] = {}
@@ -2068,6 +2070,7 @@ class PanelHub(QWidget):
         self._setup_styles()
         self._build_ui()
         self._setup_shortcuts()
+        self.restore_workspace_settings()
         self.refresh("")
 
     def _setup_styles(self) -> None:
@@ -2203,6 +2206,33 @@ class PanelHub(QWidget):
             }
             QPushButton#CopyAllBtn:focus {
                 border: 1px solid #89B4FA;
+            }
+            QSlider#OpacitySlider::groove:horizontal {
+                background-color: #2A2D3E;
+                border: 1px solid #363A4F;
+                height: 6px;
+                border-radius: 3px;
+            }
+            QSlider#OpacitySlider::sub-page:horizontal {
+                background-color: #89B4FA;
+                border: 1px solid #89B4FA;
+                height: 6px;
+                border-radius: 3px;
+            }
+            QSlider#OpacitySlider::handle:horizontal {
+                background-color: #CDD6F4;
+                border: 1px solid #89B4FA;
+                width: 12px;
+                height: 12px;
+                margin: -4px 0;
+                border-radius: 6px;
+            }
+            QSlider#OpacitySlider::handle:horizontal:hover {
+                background-color: #89B4FA;
+                border-color: #CDD6F4;
+            }
+            QSlider#OpacitySlider::handle:horizontal:focus {
+                border: 2px solid #CDD6F4;
             }
             QWidget#NoteRail {
                 background-color: #2A2D3E;
@@ -2401,6 +2431,26 @@ class PanelHub(QWidget):
         note_toolbar.addWidget(self.lbl_note_tab)
         note_toolbar.addStretch(1)
 
+        self.lbl_opacity = QLabel("100%")
+        self.lbl_opacity.setObjectName("NoteTabLabel")
+        self.lbl_opacity.setMinimumWidth(34)
+        self.lbl_opacity.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        note_toolbar.addWidget(self.lbl_opacity)
+
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setObjectName("OpacitySlider")
+        self.opacity_slider.setRange(40, 100)
+        self.opacity_slider.setSingleStep(1)
+        self.opacity_slider.setPageStep(5)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.setFixedWidth(86)
+        self.opacity_slider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.opacity_slider.setToolTip("Sidebar Opacity (40% – 100%)")
+        self.opacity_slider.valueChanged.connect(self._on_opacity_slider_changed)
+        note_toolbar.addWidget(self.opacity_slider)
+
         self.btn_copy_all = QPushButton("Copy All")
         self.btn_copy_all.setObjectName("CopyAllBtn")
         self.btn_copy_all.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2427,14 +2477,81 @@ class PanelHub(QWidget):
         self.splitter.addWidget(top_widget)
         self.splitter.addWidget(bottom_widget)
         self.splitter.setSizes([155, 350])
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
         root.addWidget(self.splitter, 1)
+
+    def _splitter_state_key(self) -> str:
+        if self.splitter.orientation() == Qt.Orientation.Horizontal:
+            return "hub_splitter_horizontal"
+        return "hub_splitter_vertical"
+
+    def _apply_saved_splitter_sizes(self) -> None:
+        horizontal = self.splitter.orientation() == Qt.Orientation.Horizontal
+        default_sizes = [320, 680] if horizontal else [155, 350]
+        key = self._splitter_state_key()
+        saved = (
+            self.db.get_workspace_setting(key, None)
+            if hasattr(self.db, "get_workspace_setting")
+            else None
+        )
+        if (
+            isinstance(saved, list)
+            and len(saved) == 2
+            and all(isinstance(v, (int, float)) and int(v) > 0 for v in saved)
+        ):
+            self.splitter.setSizes([int(saved[0]), int(saved[1])])
+        else:
+            self.splitter.setSizes(default_sizes)
+
+    def _on_splitter_moved(self, _pos: int, _index: int) -> None:
+        if self._restoring_state or not hasattr(self.db, "set_workspace_setting"):
+            return
+        sizes = [int(v) for v in self.splitter.sizes()]
+        if len(sizes) == 2 and sum(sizes) > 0:
+            self.db.set_workspace_setting(self._splitter_state_key(), sizes)
+
+    def restore_workspace_settings(self) -> None:
+        """Restores per-profile PanelHub state from workspace_state."""
+        if not hasattr(self.db, "get_workspace_setting"):
+            return
+        self._restoring_state = True
+        try:
+            saved_sort = bool(self.db.get_workspace_setting("auto_sort_usage", False))
+            self.auto_sort_usage = saved_sort
+            self.btn_auto_sort.blockSignals(True)
+            self.btn_auto_sort.setChecked(saved_sort)
+            self.btn_auto_sort.blockSignals(False)
+            self.btn_auto_sort.setIcon(
+                qta.icon(
+                    "fa5s.sort-amount-down",
+                    color="#1E1E2E" if saved_sort else "#CDD6F4",
+                )
+            )
+
+            saved_tab = self.db.get_workspace_setting("active_tab_id", None)
+            tabs = self.db.get_note_tabs()
+            tab_ids = [int(t["id"]) for t in tabs]
+            if isinstance(saved_tab, int) and saved_tab in tab_ids:
+                self.active_tab_id = saved_tab
+            elif tab_ids:
+                self.active_tab_id = tab_ids[0]
+
+            self._apply_saved_splitter_sizes()
+        finally:
+            self._restoring_state = False
+
+    def flush_pending_save(self) -> None:
+        """Flushes any debounced active note edit immediately to SQLite."""
+        if self.save_timer.isActive():
+            self.save_timer.stop()
+            self._save_active_note()
 
     def set_dock_orientation(self, horizontal: bool) -> None:
         """Arranges shortcuts and notes horizontally (top/bottom dock) or vertically (left/right dock)."""
         target = Qt.Orientation.Horizontal if horizontal else Qt.Orientation.Vertical
         if self.splitter.orientation() != target:
             self.splitter.setOrientation(target)
-            self.splitter.setSizes([320, 680] if horizontal else [155, 350])
+        self._apply_saved_splitter_sizes()
 
     def refresh(self, search_query: str = "") -> None:
         self.current_query = search_query or ""
@@ -2446,6 +2563,7 @@ class PanelHub(QWidget):
             self.save_timer.stop()
             self._active_profile = current_profile
             self.active_tab_id = None
+            self.restore_workspace_settings()
         elif self.save_timer.isActive():
             self.save_timer.stop()
             self._save_active_note()
@@ -2522,6 +2640,8 @@ class PanelHub(QWidget):
         self.auto_sort_usage = bool(checked)
         icon_color = "#1E1E2E" if self.auto_sort_usage else "#CDD6F4"
         self.btn_auto_sort.setIcon(qta.icon("fa5s.sort-amount-down", color=icon_color))
+        if not self._restoring_state and hasattr(self.db, "set_workspace_setting"):
+            self.db.set_workspace_setting("auto_sort_usage", self.auto_sort_usage)
         self._refresh_shortcuts_grid()
 
     def move_shortcut(self, from_index: int, to_index: int) -> bool:
@@ -2768,6 +2888,8 @@ class PanelHub(QWidget):
             self._save_active_note()
 
         self.active_tab_id = tab_id
+        if not self._restoring_state and hasattr(self.db, "set_workspace_setting"):
+            self.db.set_workspace_setting("active_tab_id", int(tab_id))
         for tid, (btn, icon_name) in self._tab_buttons.items():
             is_active = tid == tab_id
             btn.setIcon(_safe_qta_icon(icon_name, "#1E1E2E" if is_active else "#A6ADC8"))
@@ -3251,6 +3373,34 @@ class PanelHub(QWidget):
     def _restore_copy_all_label(self) -> None:
         if _qt_is_valid(self) and _qt_is_valid(self.btn_copy_all):
             self.btn_copy_all.setText("Copy All")
+
+    def sync_opacity_slider(self, percent: int) -> None:
+        clamped = max(40, min(100, int(percent)))
+        self.opacity_slider.blockSignals(True)
+        self.opacity_slider.setValue(clamped)
+        self.opacity_slider.blockSignals(False)
+        self.lbl_opacity.setText(f"{clamped}%")
+
+    def _on_opacity_slider_changed(self, value: int) -> None:
+        clamped = max(40, min(100, int(value)))
+        self.lbl_opacity.setText(f"{clamped}%")
+        if (
+            self.parent_sidebar is not None
+            and hasattr(self.parent_sidebar, "set_sidebar_opacity")
+        ):
+            self.parent_sidebar.set_sidebar_opacity(clamped)
+        else:
+            win = self.window()
+            if win is not None:
+                win.setWindowOpacity(clamped / 100.0)
+
+    def set_opacity_percent(self, percent: int) -> int:
+        clamped = max(40, min(100, int(percent)))
+        if self.opacity_slider.value() == clamped:
+            self._on_opacity_slider_changed(clamped)
+        else:
+            self.opacity_slider.setValue(clamped)
+        return clamped
 
     def _setup_shortcuts(self) -> None:
         self._tab_shortcuts.clear()

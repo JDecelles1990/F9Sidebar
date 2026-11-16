@@ -1,12 +1,18 @@
+import base64
 import html
 from typing import Callable, Dict, List, Optional
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer
+from PySide6.QtCore import QBuffer, QEvent, QIODevice, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QFontMetrics,
+    QImage,
     QKeyEvent,
     QKeySequence,
+    QPixmap,
     QShortcut,
+    QTextCursor,
+    QTextDocument,
+    QTextImageFormat,
     QTextLayout,
     QTextOption,
 )
@@ -35,6 +41,28 @@ try:
 except ImportError:  # pragma: no cover - shiboken6 ships with PySide6
     def _qt_is_valid(obj) -> bool:
         return obj is not None
+
+
+def _decode_image_data_uri(data_uri: str) -> QImage:
+    raw = (data_uri or "").strip()
+    if not raw.startswith("data:image/") or "," not in raw:
+        return QImage()
+    try:
+        b64_part = raw.split(",", 1)[1]
+        img_bytes = base64.b64decode(b64_part)
+        return QImage.fromData(img_bytes)
+    except Exception:
+        return QImage()
+
+
+def _encode_image_data_uri(image: QImage) -> str:
+    if image is None or image.isNull():
+        return ""
+    buf = QBuffer()
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    image.save(buf, "PNG")
+    b64 = base64.b64encode(bytes(buf.data())).decode("ascii")
+    return f"data:image/png;base64,{b64}"
 
 
 class ElidedTwoLineLabel(QLabel):
@@ -146,6 +174,9 @@ class ClipRowWidget(QWidget):
         on_send_notes: Callable[[Dict, QPushButton], None],
         on_delete: Callable[[int], None],
         on_send_menu: Optional[Callable[[Dict, QPushButton, object], None]] = None,
+        on_quick_copy: Optional[Callable[[Dict, "ClipRowWidget"], None]] = None,
+        on_edit_saved: Optional[Callable[[int, str], None]] = None,
+        on_edit_image: Optional[Callable[[int, str], None]] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -153,10 +184,15 @@ class ClipRowWidget(QWidget):
         self.clip_id = int(clip_data["id"])
         self.content = str(clip_data["content"])
         self.source_type = str(clip_data.get("source_type", "text"))
+        if self.content.strip().startswith("data:image/"):
+            self.source_type = "image"
         self.is_checked = bool(clip_data.get("is_checked", 0))
+        self._on_quick_copy = on_quick_copy
+        self._on_edit_saved = on_edit_saved
+        self._on_edit_image = on_edit_image
+        self._is_editing = False
 
         self.setObjectName("ClipRowWidget")
-        self.setToolTip(self.content)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 6)
@@ -171,7 +207,7 @@ class ClipRowWidget(QWidget):
         self._on_checked_cb = on_checked
         layout.addWidget(self.checkbox)
 
-        # 2. Source-type qtawesome icon
+        # 2. Source-type qtawesome icon + optional thumbnail preview for image clips
         self.icon_label = QLabel()
         self.icon_label.setFixedSize(20, 20)
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -179,11 +215,69 @@ class ClipRowWidget(QWidget):
         self.icon_label.setPixmap(self._icon_for_source(self.source_type).pixmap(14, 14))
         layout.addWidget(self.icon_label)
 
-        # 3. 2-line elided text preview (full text in tooltip)
-        self.preview_label = ElidedTwoLineLabel(self.content, self)
+        self.thumb_label = QLabel(self)
+        self.thumb_label.setObjectName("ClipThumbLabel")
+        self.thumb_label.setFixedSize(44, 30)
+        self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.thumb_label.hide()
+        layout.addWidget(self.thumb_label)
+
+        display_text = self.content
+        tooltip_text = self.content
+        if self.source_type == "image":
+            img = _decode_image_data_uri(self.content)
+            if not img.isNull():
+                pix = QPixmap.fromImage(img).scaled(
+                    42,
+                    28,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self.thumb_label.setPixmap(pix)
+                self.thumb_label.show()
+                self.icon_label.hide()
+                display_text = f"Image ({img.width()}×{img.height()} px)"
+                tooltip_text = (
+                    f"Captured Image ({img.width()}×{img.height()} px)\n"
+                    "Click 📋 to copy • Double-click or ✎ to edit"
+                )
+            else:
+                display_text = "Captured Image"
+                tooltip_text = "Captured Image"
+
+        self.setToolTip(tooltip_text)
+
+        # 3. 2-line elided text preview + hidden inline editor (full text/info in tooltip)
+        self.preview_label = ElidedTwoLineLabel(display_text, self)
+        self.preview_label.setToolTip(tooltip_text)
         layout.addWidget(self.preview_label, 1)
 
-        # 4. Promote / Send to Notes button
+        self.inline_edit = QLineEdit(self)
+        self.inline_edit.setObjectName("ClipInlineEdit")
+        self.inline_edit.hide()
+        self.inline_edit.installEventFilter(self)
+        layout.addWidget(self.inline_edit, 1)
+
+        # 4. Quick-copy button
+        self.btn_copy = QPushButton("📋")
+        self.btn_copy.setObjectName("RowActionBtn")
+        self.btn_copy.setFixedSize(24, 26)
+        self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copy.setToolTip("Quick copy clip to clipboard")
+        self.btn_copy.clicked.connect(self.trigger_quick_copy)
+        layout.addWidget(self.btn_copy)
+
+        # 5. Inline edit button
+        self.btn_edit = QPushButton("✎")
+        self.btn_edit.setObjectName("RowActionBtn")
+        self.btn_edit.setFixedSize(24, 26)
+        self.btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_edit.setToolTip("Edit clip (Double-click row)")
+        self.btn_edit.clicked.connect(self._on_edit_btn_clicked)
+        layout.addWidget(self.btn_edit)
+
+        # 6. Promote / Send to Notes button
         self.btn_send_notes = QPushButton("→")
         self.btn_send_notes.setObjectName("RowActionBtn")
         self.btn_send_notes.setFixedSize(26, 26)
@@ -206,7 +300,7 @@ class ClipRowWidget(QWidget):
             )
         layout.addWidget(self.btn_send_notes)
 
-        # 5. Delete button
+        # 7. Delete button
         self.btn_delete = QPushButton("×")
         self.btn_delete.setObjectName("RowDeleteBtn")
         self.btn_delete.setFixedSize(24, 26)
@@ -219,8 +313,79 @@ class ClipRowWidget(QWidget):
         self.is_checked = checked
         self._on_checked_cb(self.clip_id, checked)
 
+    def trigger_quick_copy(self) -> None:
+        if self._on_quick_copy is not None:
+            self._on_quick_copy(self.clip_data, self)
+
+    def is_editing(self) -> bool:
+        return self._is_editing
+
+    def _on_edit_btn_clicked(self) -> None:
+        if self.is_editing():
+            self.commit_inline_edit()
+        else:
+            self.start_inline_edit()
+
+    def start_inline_edit(self) -> None:
+        if self.source_type == "image":
+            if self._on_edit_image is not None:
+                self._on_edit_image(self.clip_id, self.content)
+            return
+        self._is_editing = True
+        self.inline_edit.setText(self.content)
+        self.preview_label.hide()
+        self.inline_edit.show()
+        self.inline_edit.setFocus()
+        self.inline_edit.selectAll()
+        self.btn_edit.setText("✓")
+
+    def commit_inline_edit(self) -> bool:
+        if not self._is_editing:
+            return False
+        new_text = self.inline_edit.text().strip()
+        self._is_editing = False
+        self.inline_edit.hide()
+        self.preview_label.show()
+        self.btn_edit.setText("✎")
+        if new_text and new_text != self.content:
+            self.content = new_text
+            if self._on_edit_saved is not None:
+                self._on_edit_saved(self.clip_id, new_text)
+            return True
+        return False
+
+    def cancel_inline_edit(self) -> None:
+        if not self._is_editing:
+            return
+        self._is_editing = False
+        self.inline_edit.hide()
+        self.preview_label.show()
+        self.btn_edit.setText("✎")
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.inline_edit and event.type() == QEvent.Type.KeyPress:
+            if isinstance(event, QKeyEvent):
+                if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    self.commit_inline_edit()
+                    event.accept()
+                    return True
+                if event.key() == Qt.Key.Key_Escape:
+                    self.cancel_inline_edit()
+                    event.accept()
+                    return True
+        return super().eventFilter(obj, event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.start_inline_edit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     @staticmethod
     def _icon_for_source(source_type: str):
+        if source_type == "image":
+            return qta.icon("fa5s.image", color="#89B4FA")
         if source_type == "url":
             return qta.icon("fa5s.link", color="#89B4FA")
         if source_type == "path":
@@ -269,12 +434,15 @@ class PanelQueue(QWidget):
         self.db = db_manager
         self.parent_sidebar = parent_sidebar
         self.current_query = ""
+        self._active_profile = getattr(self.db, "profile", "work")
         self._updating_ui = False
+        self._restoring_state = False
 
         self.setObjectName("PanelQueue")
         self._setup_styles()
         self._build_ui()
         self._setup_shortcuts()
+        self.restore_workspace_settings()
         self.refresh("")
 
     def _setup_styles(self) -> None:
@@ -353,6 +521,19 @@ class PanelQueue(QWidget):
             }
             QWidget#ClipRowWidget {
                 background-color: transparent;
+            }
+            QLineEdit#ClipInlineEdit {
+                background-color: #1E1E2E;
+                border: 1px solid #89B4FA;
+                border-radius: 4px;
+                color: #CDD6F4;
+                padding: 2px 6px;
+                font-size: 12px;
+            }
+            QLabel#ClipThumbLabel {
+                background-color: #1E1E2E;
+                border: 1px solid #363A4F;
+                border-radius: 4px;
             }
             QLabel {
                 color: #CDD6F4;
@@ -477,6 +658,7 @@ class PanelQueue(QWidget):
         self.cmb_join_format.setToolTip("Choose separator format when copying selected clips")
         for label, mode_value in self.JOIN_MODES:
             self.cmb_join_format.addItem(label, mode_value)
+        self.cmb_join_format.currentIndexChanged.connect(self._on_join_format_changed)
         bottom_bar.addWidget(self.cmb_join_format, 1)
 
         self.btn_copy_selected = QPushButton("Copy Selected (0)")
@@ -535,8 +717,33 @@ class PanelQueue(QWidget):
         if self.isVisible():
             self.copy_selected_clips()
 
+    def _on_join_format_changed(self, _index: int) -> None:
+        if self._restoring_state or not hasattr(self.db, "set_workspace_setting"):
+            return
+        mode = self.cmb_join_format.currentData()
+        if mode is not None:
+            self.db.set_workspace_setting("queue_join_format", mode)
+
+    def restore_workspace_settings(self) -> None:
+        """Restores per-profile Clip Queue preferences from workspace_state."""
+        if not hasattr(self.db, "get_workspace_setting"):
+            return
+        saved_mode = self.db.get_workspace_setting("queue_join_format", None)
+        idx = self.cmb_join_format.findData(saved_mode) if saved_mode is not None else 0
+        if idx < 0:
+            idx = 0
+        self._restoring_state = True
+        try:
+            self.cmb_join_format.setCurrentIndex(idx)
+        finally:
+            self._restoring_state = False
+
     def refresh(self, search_query: str = "") -> None:
         self.current_query = search_query or ""
+        current_profile = getattr(self.db, "profile", "work")
+        if current_profile != self._active_profile:
+            self._active_profile = current_profile
+            self.restore_workspace_settings()
         clips = self.db.get_clips(self.current_query)
 
         self._updating_ui = True
@@ -558,10 +765,10 @@ class PanelQueue(QWidget):
             | Qt.ItemFlag.ItemIsDragEnabled
         )
         item.setData(Qt.ItemDataRole.UserRole, dict(clip))
-        item.setToolTip(str(clip["content"]))
-
         row_widget = self._create_row_widget(clip)
-        item.setSizeHint(QSize(0, max(row_widget.sizeHint().height(), 42)))
+        item.setToolTip(row_widget.toolTip())
+        min_h = 46 if row_widget.source_type == "image" else 42
+        item.setSizeHint(QSize(0, max(row_widget.sizeHint().height(), min_h)))
 
         self.list_widget.addItem(item)
         self.list_widget.setItemWidget(item, row_widget)
@@ -573,6 +780,9 @@ class PanelQueue(QWidget):
             on_send_notes=self._on_send_to_notes,
             on_delete=self._on_delete_clip,
             on_send_menu=self._on_send_to_notes_menu,
+            on_quick_copy=self.copy_single_clip,
+            on_edit_saved=self._on_edit_clip_saved,
+            on_edit_image=self.edit_image_clip,
             parent=self.list_widget,
         )
 
@@ -742,22 +952,66 @@ class PanelQueue(QWidget):
 
         existing = selected_tab.get("content") or ""
         existing_rich = (selected_tab.get("rich_content") or "").strip()
-        if existing.strip():
-            separator = "" if existing.endswith("\n") else "\n"
-            updated = f"{existing}{separator}{content}"
-        else:
-            updated = content
+        is_image = (content or "").strip().startswith("data:image/")
 
-        updated_rich = ""
-        if existing_rich:
-            escaped_block = f"<p>{html.escape(content).replace(chr(10), '<br/>')}</p>"
-            body_end = existing_rich.lower().rfind("</body>")
-            if body_end != -1:
-                updated_rich = (
-                    existing_rich[:body_end] + escaped_block + existing_rich[body_end:]
-                )
+        if is_image:
+            img = _decode_image_data_uri(content)
+            if img.isNull():
+                return
+            w = min(280, img.width())
+            h = max(1, int(round(img.height() * (w / max(1, img.width())))))
+            if (
+                hub is not None
+                and int(selected_tab["id"]) == getattr(hub, "active_tab_id", None)
+                and hasattr(hub, "_append_image_to_active_editor")
+            ):
+                hub._append_image_to_active_editor(img, content, w, h)
+                if hasattr(hub, "save_timer"):
+                    hub.save_timer.stop()
+                if hasattr(hub, "_save_active_note"):
+                    hub._save_active_note()
+                self._flash_send_button(btn)
+                return
+
+            from ui.panel_hub import _register_data_uri_images
+
+            doc = QTextDocument()
+            if existing_rich:
+                _register_data_uri_images(doc, existing_rich)
+                doc.setHtml(existing_rich)
             else:
-                updated_rich = existing_rich + escaped_block
+                doc.setPlainText(existing)
+            doc.addResource(
+                QTextDocument.ResourceType.ImageResource, QUrl(content), img
+            )
+            cur = QTextCursor(doc)
+            cur.movePosition(QTextCursor.MoveOperation.End)
+            if (doc.toPlainText().strip() or "<img " in doc.toHtml().lower()) and not doc.toPlainText().endswith("\n"):
+                cur.insertText("\n")
+            fmt = QTextImageFormat()
+            fmt.setName(content)
+            fmt.setWidth(w)
+            fmt.setHeight(h)
+            cur.insertImage(fmt)
+            updated = doc.toPlainText()
+            updated_rich = doc.toHtml()
+        else:
+            if existing.strip():
+                separator = "" if existing.endswith("\n") else "\n"
+                updated = f"{existing}{separator}{content}"
+            else:
+                updated = content
+
+            updated_rich = ""
+            if existing_rich:
+                escaped_block = f"<p>{html.escape(content).replace(chr(10), '<br/>')}</p>"
+                body_end = existing_rich.lower().rfind("</body>")
+                if body_end != -1:
+                    updated_rich = (
+                        existing_rich[:body_end] + escaped_block + existing_rich[body_end:]
+                    )
+                else:
+                    updated_rich = existing_rich + escaped_block
 
         self.db.update_note_content(
             int(selected_tab["id"]), updated, rich_content=updated_rich
@@ -767,6 +1021,56 @@ class PanelQueue(QWidget):
             hub.refresh(self.current_query)
 
         self._flash_send_button(btn)
+
+    def copy_single_clip(
+        self, clip_data: Dict, row_widget: Optional[ClipRowWidget] = None
+    ) -> None:
+        """Copies a single text/URL/path or image clip directly to the clipboard."""
+        content = str(clip_data.get("content", ""))
+        src = str(clip_data.get("source_type", "text"))
+        if src == "image" or content.strip().startswith("data:image/"):
+            img = _decode_image_data_uri(content)
+            if img.isNull():
+                return
+            QApplication.clipboard().setImage(img)
+        else:
+            QApplication.clipboard().setText(content)
+
+        if row_widget is not None and hasattr(row_widget, "btn_copy"):
+            self._flash_row_button(row_widget.btn_copy, "📋")
+
+    def _on_edit_clip_saved(self, clip_id: int, new_content: str) -> None:
+        if hasattr(self.db, "update_clip"):
+            self.db.update_clip(clip_id, new_content)
+        self._sync_parent_refresh()
+
+    def edit_image_clip(self, clip_id: int, current_data_uri: str) -> bool:
+        """Opens ImageEditDialog for an image clip and persists or deletes it."""
+        img = _decode_image_data_uri(current_data_uri)
+        if img.isNull():
+            return False
+        from ui.panel_hub import ImageEditDialog
+
+        edited_ok = False
+
+        def _open_editor() -> None:
+            nonlocal edited_ok
+            dlg = ImageEditDialog(img, parent=self)
+            res = self._exec_dialog(dlg)
+            if dlg.delete_requested:
+                self._on_delete_clip(clip_id)
+                edited_ok = True
+                return
+            if res == QDialog.DialogCode.Accepted:
+                new_img = dlg.get_result_image()
+                new_uri = _encode_image_data_uri(new_img)
+                if new_uri and hasattr(self.db, "update_clip"):
+                    self.db.update_clip(clip_id, new_uri, source_type="image")
+                    self._sync_parent_refresh()
+                    edited_ok = True
+
+        self._run_with_pin_guard(_open_editor)
+        return edited_ok
 
     def promote_clip_to_shortcut(
         self,
@@ -815,9 +1119,21 @@ class PanelQueue(QWidget):
         return shortcut_id
 
     def _flash_send_button(self, btn: Optional[QPushButton]) -> None:
+        self._flash_row_button(btn, "→")
+
+    def _flash_row_button(
+        self, btn: Optional[QPushButton], restore_text: str
+    ) -> None:
         if btn is not None and _qt_is_valid(btn):
             btn.setText("✓")
-            QTimer.singleShot(800, lambda: self._restore_send_button(btn))
+            QTimer.singleShot(
+                800, lambda b=btn, txt=restore_text: self._restore_row_button(b, txt)
+            )
+
+    @staticmethod
+    def _restore_row_button(btn: QPushButton, text: str) -> None:
+        if _qt_is_valid(btn):
+            btn.setText(text)
 
     @staticmethod
     def _populate_note_tab_menu(menu: QMenu, tabs: List[Dict], prefix: str = "") -> Dict:
@@ -907,11 +1223,6 @@ class PanelQueue(QWidget):
 
         self._run_with_pin_guard(_open_menu)
 
-    @staticmethod
-    def _restore_send_button(btn: QPushButton) -> None:
-        if _qt_is_valid(btn):
-            btn.setText("→")
-
     def _on_rows_reordered(self) -> None:
         ordered_items: List[tuple[int, Dict]] = []
         existing_orders: List[int] = []
@@ -941,7 +1252,8 @@ class PanelQueue(QWidget):
                 # Qt's InternalMove removes the itemWidget on moved rows; rebind if missing.
                 if self.list_widget.itemWidget(item) is None:
                     row_widget = self._create_row_widget(data)
-                    item.setSizeHint(QSize(0, max(row_widget.sizeHint().height(), 42)))
+                    min_h = 46 if row_widget.source_type == "image" else 42
+                    item.setSizeHint(QSize(0, max(row_widget.sizeHint().height(), min_h)))
                     self.list_widget.setItemWidget(item, row_widget)
 
             self._persist_clip_order(updates)
@@ -964,25 +1276,37 @@ class PanelQueue(QWidget):
             self.refresh(self.current_query)
 
     def copy_selected_clips(self) -> None:
-        selected_contents: List[str] = []
+        checked_items: List[tuple[str, str]] = []
         for idx in range(self.list_widget.count()):
             item = self.list_widget.item(idx)
             data = item.data(Qt.ItemDataRole.UserRole) or {}
             if data.get("is_checked"):
-                selected_contents.append(str(data.get("content", "")))
+                raw_content = str(data.get("content", ""))
+                src = str(data.get("source_type", "text"))
+                if raw_content.strip().startswith("data:image/"):
+                    src = "image"
+                checked_items.append((src, raw_content))
 
-        if not selected_contents:
+        if not checked_items:
             return
 
-        mode = self.cmb_join_format.currentData()
-        if mode == "bullets":
-            combined = "\n".join(f"- {text}" for text in selected_contents)
-        elif mode == "\n\n":
-            combined = "\n\n".join(selected_contents)
+        if all(src == "image" for src, _ in checked_items):
+            img = _decode_image_data_uri(checked_items[0][1])
+            if not img.isNull():
+                QApplication.clipboard().setImage(img)
         else:
-            combined = "\n".join(selected_contents)
-
-        QApplication.clipboard().setText(combined)
+            selected_contents = [
+                "[Image]" if src == "image" else content
+                for src, content in checked_items
+            ]
+            mode = self.cmb_join_format.currentData()
+            if mode == "bullets":
+                combined = "\n".join(f"- {text}" for text in selected_contents)
+            elif mode == "\n\n":
+                combined = "\n\n".join(selected_contents)
+            else:
+                combined = "\n".join(selected_contents)
+            QApplication.clipboard().setText(combined)
 
         if self.parent_sidebar and hasattr(self.parent_sidebar, "hide_sidebar"):
             self.parent_sidebar.hide_sidebar(restore_focus=True)

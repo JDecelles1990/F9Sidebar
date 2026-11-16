@@ -1,23 +1,40 @@
+import base64
 import ctypes
 from ctypes import wintypes
 import os
 from pathlib import Path
-from PySide6.QtCore import QAbstractNativeEventFilter, QMimeData, QObject, QTimer, Signal
+from PySide6.QtCore import (
+    QAbstractNativeEventFilter,
+    QBuffer,
+    QIODevice,
+    QMimeData,
+    QObject,
+    QTimer,
+    Signal,
+)
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QApplication
 
 WM_HOTKEY = 0x0312
+MOD_ALT = 0x0001
 MOD_NOREPEAT = 0x4000
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 
 VK_F9 = 0x78
 VK_CONTROL = 0x11
+VK_MENU = 0x12
+VK_LMENU = 0xA4
+VK_RMENU = 0xA5
 VK_C = 0x43
+VK_V = 0x56
 KEYEVENTF_KEYUP = 0x0002
 
-HOTKEY_TOGGLE = 1   # F9
-HOTKEY_CAPTURE = 2  # Ctrl + F9
-HOTKEY_SWITCH = 3   # Shift + F9
+HOTKEY_TOGGLE = 1      # F9
+HOTKEY_CAPTURE = 2     # Ctrl + F9
+HOTKEY_SWITCH = 3      # Shift + F9
+HOTKEY_PIN = 4         # Ctrl + Shift + F9
+HOTKEY_PASTE_LAST = 5  # Ctrl + Alt + F9
 
 ABM_NEW = 0x00000000
 ABM_REMOVE = 0x00000001
@@ -92,7 +109,9 @@ class _NativeHotkeyFilter(QAbstractNativeEventFilter):
 class Win32HookManager(QObject):
     sig_toggle_sidebar = Signal()
     sig_switch_panel = Signal()
-    sig_clip_captured = Signal(str, str)  # (content, source_type: 'text'|'url'|'path')
+    sig_toggle_pin = Signal()
+    sig_paste_last_clip = Signal()
+    sig_clip_captured = Signal(str, str)  # (content, source_type: 'text'|'url'|'path'|'image')
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -107,10 +126,12 @@ class Win32HookManager(QObject):
         self.appbar_edge: str = "right"
         self._pushed_windows: dict[int, dict] = {}
         self._force_window_push_in_tests: bool = False
+        self._paste_seq: int = 0
+        self._paste_backup_mime: QMimeData | None = None
         self._filter = _NativeHotkeyFilter(self._on_wm_hotkey)
 
     def install(self, app: QApplication, window_hwnd: int) -> None:
-        """Installs the event filter and registers F9, Ctrl+F9, and Shift+F9."""
+        """Installs the event filter and registers global F9 hotkeys."""
         self.hwnd = int(window_hwnd)
         app.installNativeEventFilter(self._filter)
         self.register_all_hotkeys()
@@ -122,6 +143,18 @@ class Win32HookManager(QObject):
             (HOTKEY_TOGGLE, MOD_NOREPEAT, VK_F9, "F9"),
             (HOTKEY_CAPTURE, MOD_NOREPEAT | MOD_CONTROL, VK_F9, "Ctrl+F9"),
             (HOTKEY_SWITCH, MOD_NOREPEAT | MOD_SHIFT, VK_F9, "Shift+F9"),
+            (
+                HOTKEY_PIN,
+                MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT,
+                VK_F9,
+                "Ctrl+Shift+F9",
+            ),
+            (
+                HOTKEY_PASTE_LAST,
+                MOD_NOREPEAT | MOD_CONTROL | MOD_ALT,
+                VK_F9,
+                "Ctrl+Alt+F9",
+            ),
         ]
         for hk_id, modifiers, vk, label in bindings:
             ok = self.user32.RegisterHotKey(self.hwnd, hk_id, modifiers, vk)
@@ -131,7 +164,13 @@ class Win32HookManager(QObject):
     def unregister_all_hotkeys(self) -> None:
         if not self.hwnd:
             return
-        for hk_id in (HOTKEY_TOGGLE, HOTKEY_CAPTURE, HOTKEY_SWITCH):
+        for hk_id in (
+            HOTKEY_TOGGLE,
+            HOTKEY_CAPTURE,
+            HOTKEY_SWITCH,
+            HOTKEY_PIN,
+            HOTKEY_PASTE_LAST,
+        ):
             self.user32.UnregisterHotKey(self.hwnd, hk_id)
 
     def remember_foreground_window(self, sidebar_hwnd: int) -> None:
@@ -467,8 +506,83 @@ class Win32HookManager(QObject):
             self.sig_toggle_sidebar.emit()
         elif hotkey_id == HOTKEY_SWITCH:
             self.sig_switch_panel.emit()
+        elif hotkey_id == HOTKEY_PIN:
+            self.sig_toggle_pin.emit()
+        elif hotkey_id == HOTKEY_PASTE_LAST:
+            self.sig_paste_last_clip.emit()
         elif hotkey_id == HOTKEY_CAPTURE:
             self.capture_active_selection()
+
+    @staticmethod
+    def _decode_image_data_uri(data_uri: str) -> QImage:
+        raw = (data_uri or "").strip()
+        if not raw.startswith("data:image/") or "," not in raw:
+            return QImage()
+        try:
+            b64_part = raw.split(",", 1)[1]
+            return QImage.fromData(base64.b64decode(b64_part))
+        except Exception:
+            return QImage()
+
+    def paste_into_active_window(self, content: str, source_type: str = "text") -> bool:
+        """Places captured text or image on the clipboard, sends Ctrl+V, then restores clipboard."""
+        raw = content or ""
+        is_image = source_type == "image" or raw.strip().startswith("data:image/")
+        img = QImage()
+        if is_image:
+            img = self._decode_image_data_uri(raw)
+            if img.isNull():
+                return False
+        elif not raw:
+            return False
+
+        clipboard = QApplication.clipboard()
+        self._paste_seq += 1
+        seq = self._paste_seq
+        if self._paste_backup_mime is None:
+            self._paste_backup_mime = self._clone_mime_data(clipboard.mimeData())
+
+        if is_image:
+            clipboard.setImage(img)
+        else:
+            clipboard.setText(raw)
+
+        if not (
+            os.environ.get("QT_QPA_PLATFORM") == "offscreen"
+            and isinstance(self.user32, ctypes.WinDLL)
+        ):
+            for key_vk in (VK_F9, VK_MENU, VK_LMENU, VK_RMENU):
+                self.user32.keybd_event(key_vk, 0, KEYEVENTF_KEYUP, 0)
+            self.user32.keybd_event(VK_CONTROL, 0, 0, 0)
+            self.user32.keybd_event(VK_V, 0, 0, 0)
+            self.user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
+            self.user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+
+        QTimer.singleShot(120, lambda s=seq: self._finalize_paste(s))
+        return True
+
+    def _restore_clipboard(self, backup: QMimeData | None) -> None:
+        clipboard = QApplication.clipboard()
+        if backup is None or (not backup.formats() and not backup.hasImage()):
+            clipboard.clear()
+            return
+        formats = set(backup.formats())
+        if backup.hasImage() and not backup.hasUrls() and not backup.hasHtml():
+            img = self._extract_mime_image(backup)
+            if not img.isNull():
+                clipboard.setImage(img)
+                return
+        if backup.hasText() and formats <= {"text/plain"}:
+            clipboard.setText(backup.text())
+            return
+        clipboard.setMimeData(backup)
+
+    def _finalize_paste(self, seq: int) -> None:
+        if seq != self._paste_seq or self._paste_backup_mime is None:
+            return
+        backup = self._paste_backup_mime
+        self._paste_backup_mime = None
+        self._restore_clipboard(backup)
 
     def capture_active_selection(self) -> None:
         """Silently copies the active selection, classifies it, and restores the clipboard."""
@@ -487,6 +601,27 @@ class Win32HookManager(QObject):
 
         # Wait 75ms for the target application to populate the Windows clipboard
         QTimer.singleShot(75, lambda: self._finalize_capture(backup_mime))
+
+    @staticmethod
+    def _encode_image_data_uri(image: QImage) -> str:
+        if image is None or image.isNull():
+            return ""
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buf, "PNG")
+        b64 = base64.b64encode(bytes(buf.data())).decode("ascii")
+        return f"data:image/png;base64,{b64}"
+
+    @staticmethod
+    def _extract_mime_image(mime: QMimeData | None) -> QImage:
+        if mime is None or not mime.hasImage():
+            return QImage()
+        img_data = mime.imageData()
+        if isinstance(img_data, QImage):
+            return img_data
+        if isinstance(img_data, QPixmap):
+            return img_data.toImage()
+        return QImage()
 
     def _finalize_capture(self, backup_mime: QMimeData) -> None:
         clipboard = QApplication.clipboard()
@@ -513,8 +648,24 @@ class Win32HookManager(QObject):
                     elif Path(raw).is_absolute() and Path(raw).exists():
                         source_type = "path"
 
+            # 3. Otherwise inspect newly copied image data from Ctrl+C
+            if not captured_text and new_mime.hasImage():
+                img = self._extract_mime_image(new_mime)
+                if img.isNull():
+                    img = clipboard.image()
+                if not img.isNull():
+                    captured_text = self._encode_image_data_uri(img)
+                    source_type = "image"
+
+        # 4. Fallback: capture screenshot/image already sitting on the clipboard (e.g. Win+Shift+S)
+        if not captured_text and backup_mime is not None and backup_mime.hasImage():
+            img = self._extract_mime_image(backup_mime)
+            if not img.isNull():
+                captured_text = self._encode_image_data_uri(img)
+                source_type = "image"
+
         # Restore original clipboard contents
-        clipboard.setMimeData(backup_mime)
+        self._restore_clipboard(backup_mime)
 
         if captured_text:
             self.sig_clip_captured.emit(captured_text, source_type)
@@ -525,5 +676,9 @@ class Win32HookManager(QObject):
         if src is None:
             return clone
         for fmt in src.formats():
+            if fmt == "application/x-qt-image":
+                continue
             clone.setData(fmt, src.data(fmt))
+        if src.hasImage():
+            clone.setImageData(src.imageData())
         return clone

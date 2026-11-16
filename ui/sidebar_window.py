@@ -1,4 +1,13 @@
-from PySide6.QtCore import QEasingCurve, QEvent, QPropertyAnimation, QRect, Qt, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QPoint,
+    QPropertyAnimation,
+    QRect,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QAction, QCursor, QGuiApplication, QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -33,6 +42,7 @@ class SidebarWindow(QWidget):
     sig_profile_changed = Signal(str)
     sig_dock_edge_changed = Signal(str)
     sig_appbar_toggled = Signal(bool)
+    sig_opacity_changed = Signal(int)
 
     DOCK_EDGES = ("right", "bottom", "left", "top")
     DOCK_EDGE_SYMBOLS = {
@@ -58,12 +68,19 @@ class SidebarWindow(QWidget):
         self.appbar_enabled = False
         self.is_pinned = False
         self._is_closing = False
+        self._restoring_state = False
         self._last_appbar_rect: QRect | None = None
+        self.sidebar_opacity = 100
         self.unread_clips = 0
         self.toast = ToastPopup()
         self.destroyed.connect(
             lambda *_args, t=self.toast: t.close() if _qt_is_valid(t) else None
         )
+
+        self._opacity_save_timer = QTimer(self)
+        self._opacity_save_timer.setSingleShot(True)
+        self._opacity_save_timer.setInterval(200)
+        self._opacity_save_timer.timeout.connect(self._persist_opacity_setting)
 
         self.setWindowTitle("F9Sidebar")
         self.setWindowFlags(
@@ -76,6 +93,7 @@ class SidebarWindow(QWidget):
         self._setup_styles()
         self._build_ui()
         self._setup_animation()
+        self._restore_persisted_state()
         self.refresh_views()
 
         app = QApplication.instance()
@@ -186,7 +204,7 @@ class SidebarWindow(QWidget):
         self.btn_pin.setObjectName("HeaderBtn")
         self.btn_pin.setCheckable(True)
         self.btn_pin.setIcon(qta.icon("fa5s.thumbtack", color="#CDD6F4"))
-        self.btn_pin.setToolTip("Pin sidebar open (disable auto-hide on focus loss)")
+        self.btn_pin.setToolTip("Pin sidebar open & dock edge (Ctrl+Shift+F9)")
         self.btn_pin.toggled.connect(self._on_pin_toggled)
         top_row.addWidget(self.btn_pin)
 
@@ -335,8 +353,94 @@ class SidebarWindow(QWidget):
             )
             end_rect = QRect(rx, ry, rw, rh)
             self._last_appbar_rect = QRect(end_rect)
+            self._save_pinned_screen(screen)
             start_rect = self._compute_hide_rect(end_rect)
         return start_rect, end_rect
+
+    def _save_pinned_screen(self, screen) -> None:
+        if (
+            self._restoring_state
+            or screen is None
+            or not hasattr(self.db, "update_global_settings")
+        ):
+            return
+        center = screen.geometry().center()
+        screen_name = screen.name() if hasattr(screen, "name") else ""
+        self.db.update_global_settings(
+            {
+                "pinned_screen_name": screen_name,
+                "pinned_screen_center": [int(center.x()), int(center.y())],
+            }
+        )
+
+    def get_pinned_screen(self):
+        """Resolves the remembered pinned monitor, falling back to cursor or primary screen."""
+        saved_name = (
+            self.db.get_global_setting("pinned_screen_name", "")
+            if hasattr(self.db, "get_global_setting")
+            else ""
+        )
+        saved_center = (
+            self.db.get_global_setting("pinned_screen_center", None)
+            if hasattr(self.db, "get_global_setting")
+            else None
+        )
+        screen_by_pt = None
+        if isinstance(saved_center, list) and len(saved_center) == 2:
+            screen_by_pt = QGuiApplication.screenAt(
+                QPoint(int(saved_center[0]), int(saved_center[1]))
+            )
+            if screen_by_pt is not None and (
+                not saved_name or screen_by_pt.name() == saved_name
+            ):
+                return screen_by_pt
+        if saved_name:
+            for scr in QGuiApplication.screens():
+                if scr.name() == saved_name:
+                    return scr
+        if screen_by_pt is not None:
+            return screen_by_pt
+        return QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+
+    def _restore_persisted_state(self) -> None:
+        """Restores global window settings and initial per-profile active panel."""
+        if not hasattr(self.db, "get_global_setting"):
+            return
+        self._restoring_state = True
+        try:
+            self.btn_profile.setText(str(getattr(self.db, "profile", "work")).upper())
+
+            saved_edge = str(self.db.get_global_setting("dock_edge", "right")).lower()
+            if saved_edge in self.DOCK_EDGES:
+                self.set_dock_edge(saved_edge)
+
+            saved_opacity = self.db.get_global_setting("sidebar_opacity", 100)
+            try:
+                self.set_sidebar_opacity(int(saved_opacity))
+            except (TypeError, ValueError):
+                self.set_sidebar_opacity(100)
+
+            saved_pin = bool(self.db.get_global_setting("is_pinned", False))
+            self.set_appbar_mode(saved_pin)
+
+            if hasattr(self.db, "get_workspace_setting"):
+                saved_panel = self.db.get_workspace_setting("active_panel", 0)
+                if saved_panel in (0, 1):
+                    self.switch_to_panel(int(saved_panel))
+        finally:
+            self._restoring_state = False
+
+    def _persist_opacity_setting(self) -> None:
+        if hasattr(self.db, "set_global_setting"):
+            self.db.set_global_setting("sidebar_opacity", int(self.sidebar_opacity))
+
+    def flush_pending_state(self) -> None:
+        """Flushes any debounced settings or active note edits to storage."""
+        if self._opacity_save_timer.isActive():
+            self._opacity_save_timer.stop()
+            self._persist_opacity_setting()
+        if hasattr(self.panel_hub, "flush_pending_save"):
+            self.panel_hub.flush_pending_save()
 
     @staticmethod
     def _exec_menu(menu: QMenu, global_pos):
@@ -379,6 +483,8 @@ class SidebarWindow(QWidget):
             _, end_rect = self._resolve_target_rects(screen)
             self.anim.stop()
             self.setGeometry(end_rect)
+        if not self._restoring_state and hasattr(self.db, "set_global_setting"):
+            self.db.set_global_setting("dock_edge", self.dock_edge)
         self.sig_dock_edge_changed.emit(self.dock_edge)
 
     def cycle_dock_edge(self) -> str:
@@ -413,6 +519,8 @@ class SidebarWindow(QWidget):
             self.setGeometry(end_rect)
         elif not enabled:
             self._unregister_appbar_if_needed(restore_windows=True)
+        if not self._restoring_state and hasattr(self.db, "set_global_setting"):
+            self.db.set_global_setting("is_pinned", self.is_pinned)
         self.sig_appbar_toggled.emit(self.appbar_enabled)
 
     def toggle_sidebar(self) -> None:
@@ -421,14 +529,19 @@ class SidebarWindow(QWidget):
         else:
             self.show_sidebar()
 
-    def show_sidebar(self) -> None:
+    def show_sidebar(self, target_screen=None) -> None:
         self.hooks.remember_foreground_window(int(self.winId()))
         self._is_closing = False
 
-        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        screen = (
+            target_screen
+            or QGuiApplication.screenAt(QCursor.pos())
+            or QGuiApplication.primaryScreen()
+        )
         start_rect, end_rect = self._resolve_target_rects(screen)
 
         self.setGeometry(start_rect)
+        self.setWindowOpacity(self.sidebar_opacity / 100.0)
         self.show()
         self.raise_()
         self.activateWindow()
@@ -464,11 +577,14 @@ class SidebarWindow(QWidget):
 
     # --- Panel & Profile Actions ---
     def switch_to_panel(self, index: int) -> None:
-        self.stack.setCurrentIndex(index)
-        self.btn_panel_hub.setChecked(index == 0)
-        self.btn_panel_queue.setChecked(index == 1)
-        if index == 1:
+        clamped_idx = 1 if int(index) == 1 else 0
+        self.stack.setCurrentIndex(clamped_idx)
+        self.btn_panel_hub.setChecked(clamped_idx == 0)
+        self.btn_panel_queue.setChecked(clamped_idx == 1)
+        if clamped_idx == 1:
             self.unread_clips = 0
+        if not self._restoring_state and hasattr(self.db, "set_workspace_setting"):
+            self.db.set_workspace_setting("active_panel", clamped_idx)
         self.refresh_views()
 
     def toggle_panel(self) -> None:
@@ -478,13 +594,59 @@ class SidebarWindow(QWidget):
     def _toggle_profile(self) -> None:
         new_prof = "personal" if self.db.profile == "work" else "work"
         self.db.switch_profile(new_prof)
+        if hasattr(self.db, "set_global_setting"):
+            self.db.set_global_setting("active_profile", new_prof)
         self.btn_profile.setText(new_prof.upper())
         self.unread_clips = 0
-        self.refresh_views()
+        saved_panel = (
+            self.db.get_workspace_setting("active_panel", 0)
+            if hasattr(self.db, "get_workspace_setting")
+            else 0
+        )
+        panel_idx = 1 if saved_panel == 1 else 0
+        self._restoring_state = True
+        try:
+            self.switch_to_panel(panel_idx)
+        finally:
+            self._restoring_state = False
         self.sig_profile_changed.emit(new_prof)
+
+    def set_sidebar_opacity(self, percent: int) -> int:
+        """Sets window opacity clamped between 40% and 100% and syncs PanelHub's slider."""
+        clamped = max(40, min(100, int(percent)))
+        self.sidebar_opacity = clamped
+        self.setWindowOpacity(clamped / 100.0)
+        if hasattr(self, "panel_hub") and hasattr(self.panel_hub, "sync_opacity_slider"):
+            self.panel_hub.sync_opacity_slider(clamped)
+        if not self._restoring_state:
+            self._opacity_save_timer.start()
+        self.sig_opacity_changed.emit(clamped)
+        return clamped
+
+    def toggle_pin(self) -> bool:
+        """Toggles sidebar pin and AppBar dock state (opening first if hidden while unpinned)."""
+        new_state = not self.is_pinned
+        self.set_appbar_mode(new_state)
+        if new_state and (not self.isVisible() or self._is_closing):
+            self.show_sidebar()
+        return self.is_pinned
 
     def _on_pin_toggled(self, checked: bool) -> None:
         self.set_appbar_mode(bool(checked))
+
+    def paste_last_captured_clip(self) -> bool:
+        """Pastes the most recently Ctrl+F9 captured item into the active window."""
+        latest = self.db.get_latest_clip() if hasattr(self.db, "get_latest_clip") else None
+        if latest is None:
+            clips = self.db.get_clips("")
+            latest = clips[-1] if clips else None
+        if not latest:
+            return False
+        content = str(latest.get("content", ""))
+        source_type = str(latest.get("source_type", "text"))
+        if hasattr(self.hooks, "paste_into_active_window"):
+            return bool(self.hooks.paste_into_active_window(content, source_type))
+        return False
 
     def on_new_clip_captured(self, content: str, source_type: str) -> None:
         was_hidden = not self.isVisible()
@@ -578,5 +740,6 @@ class SidebarWindow(QWidget):
         super().changeEvent(event)
 
     def closeEvent(self, event) -> None:
+        self.flush_pending_state()
         self._unregister_appbar_if_needed()
         super().closeEvent(event)

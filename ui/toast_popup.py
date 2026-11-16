@@ -65,6 +65,8 @@ class ToastPopup(QWidget):
 
     @staticmethod
     def _icon_for_source(source_type: str):
+        if source_type == "image":
+            return qta.icon("fa5s.image", color="#89B4FA")
         if source_type == "url":
             return qta.icon("fa5s.link", color="#89B4FA")
         if source_type == "path":
@@ -73,7 +75,10 @@ class ToastPopup(QWidget):
 
     @staticmethod
     def _truncate_preview(content: str, max_chars: int = 42) -> str:
-        collapsed = " ".join((content or "").strip().split())
+        raw = (content or "").strip()
+        if raw.startswith("data:image/"):
+            return "Screenshot / Image"
+        collapsed = " ".join(raw.split())
         if len(collapsed) <= max_chars:
             return collapsed
         return collapsed[: max_chars - 1].rstrip() + "…"

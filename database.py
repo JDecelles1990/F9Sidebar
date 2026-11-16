@@ -1,9 +1,11 @@
+import json
+import os
 import shutil
 import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 def get_app_data_dir() -> Path:
@@ -32,11 +34,22 @@ DEFAULT_NOTE_TABS = [
 ]
 
 
+DEFAULT_GLOBAL_SETTINGS: Dict[str, Any] = {
+    "active_profile": "work",
+    "dock_edge": "right",
+    "sidebar_opacity": 100,
+    "is_pinned": False,
+    "pinned_screen_name": "",
+    "pinned_screen_center": None,
+}
+
+
 class DatabaseManager:
     def __init__(self, profile: str = "work", base_dir: Optional[Path] = None):
         self.base_dir = base_dir or get_app_data_dir()
         self.backup_dir = self.base_dir / "backups"
         self.icons_dir = self.base_dir / "icons"
+        self.settings_path = self.base_dir / "settings.json"
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.icons_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +110,11 @@ class DatabaseManager:
                     sort_order INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
+
+                CREATE TABLE IF NOT EXISTS workspace_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 """
             )
             # Non-destructive column migrations for existing databases
@@ -147,6 +165,60 @@ class DatabaseManager:
         for old_backup in backups[max_backups:]:
             old_backup.unlink(missing_ok=True)
 
+    # --- Global & Per-Profile Settings Helpers ---
+    def get_global_settings(self) -> Dict[str, Any]:
+        """Reads shared global app settings from data/settings.json."""
+        settings = dict(DEFAULT_GLOBAL_SETTINGS)
+        if not self.settings_path.is_file():
+            return settings
+        try:
+            raw = json.loads(self.settings_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                settings.update(raw)
+        except Exception:
+            pass
+        return settings
+
+    def get_global_setting(self, key: str, default: Any = None) -> Any:
+        settings = self.get_global_settings()
+        return settings.get(key, default)
+
+    def update_global_settings(self, updates: Dict[str, Any]) -> Dict[str, Any]:
+        """Atomically merges and writes updates into data/settings.json."""
+        settings = self.get_global_settings()
+        settings.update(updates)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.settings_path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        os.replace(tmp_path, self.settings_path)
+        return settings
+
+    def set_global_setting(self, key: str, value: Any) -> None:
+        self.update_global_settings({key: value})
+
+    def get_workspace_setting(self, key: str, default: Any = None) -> Any:
+        """Reads a per-profile workspace setting from SQLite workspace_state."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM workspace_state WHERE key = ?",
+                (str(key),),
+            ).fetchone()
+        if row is None:
+            return default
+        try:
+            return json.loads(row["value"])
+        except Exception:
+            return default
+
+    def set_workspace_setting(self, key: str, value: Any) -> None:
+        """Persists a per-profile workspace setting inside SQLite workspace_state."""
+        payload = json.dumps(value)
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO workspace_state (key, value) VALUES (?, ?)",
+                (str(key), payload),
+            )
+
     # --- Panel 2: Clip Queue Helpers ---
     def add_clip(self, content: str, source_type: str = "text") -> int:
         content = content.strip()
@@ -178,12 +250,43 @@ class DatabaseManager:
                 ).fetchall()
             return [dict(r) for r in rows]
 
+    def get_latest_clip(self) -> Optional[Dict]:
+        """Returns the most recently captured clip in clip_queue, or None if empty."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM clip_queue ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def set_clip_checked(self, clip_id: int, is_checked: bool) -> None:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE clip_queue SET is_checked = ? WHERE id = ?",
                 (1 if is_checked else 0, clip_id),
             )
+
+    def update_clip(
+        self, clip_id: int, content: str, source_type: Optional[str] = None
+    ) -> bool:
+        """Updates clip text/image content and updates inferred source_type."""
+        cleaned = (content or "").strip()
+        if not cleaned:
+            return False
+        if source_type is None:
+            if cleaned.startswith("data:image/"):
+                source_type = "image"
+            elif cleaned.startswith(("http://", "https://")) and "\n" not in cleaned:
+                source_type = "url"
+            elif Path(cleaned).is_absolute() and Path(cleaned).exists():
+                source_type = "path"
+            else:
+                source_type = "text"
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE clip_queue SET content = ?, source_type = ? WHERE id = ?",
+                (cleaned, source_type, int(clip_id)),
+            )
+            return cur.rowcount > 0
 
     def delete_clip(self, clip_id: int) -> None:
         with self._connect() as conn:
