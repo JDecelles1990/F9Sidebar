@@ -84,7 +84,7 @@ If creating a fresh `.venv` on a new machine:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install PySide6 qtawesome
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 python main.py
 ```
 
