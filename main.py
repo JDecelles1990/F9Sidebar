@@ -2,6 +2,30 @@ import json
 from pathlib import Path
 import sys
 
+
+def _reexec_into_venv_if_needed() -> None:
+    """Re-launches main.py under .venv when invoked with global `python main.py`."""
+    if getattr(sys, "frozen", False) or __name__ != "__main__":
+        return
+    venv_dir = Path(__file__).resolve().parent / ".venv"
+    exe_name = (
+        "pythonw.exe"
+        if Path(sys.executable).name.lower() == "pythonw.exe"
+        else "python.exe"
+    )
+    venv_python = venv_dir / "Scripts" / exe_name
+    if venv_python.is_file() and Path(sys.prefix).resolve() != venv_dir.resolve():
+        import subprocess
+
+        raise SystemExit(
+            subprocess.call(
+                [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]]
+            )
+        )
+
+
+_reexec_into_venv_if_needed()
+
 try:
     import winreg
 except ImportError:  # pragma: no cover - Windows only
