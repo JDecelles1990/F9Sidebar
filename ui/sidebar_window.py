@@ -1,6 +1,9 @@
+from typing import Callable
+
 from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
+    QMimeData,
     QPoint,
     QPropertyAnimation,
     QRect,
@@ -37,6 +40,72 @@ from ui.button_fx import install_button_fx
 from ui.toast_popup import ToastPopup
 
 
+def _is_droppable_mime(mime: QMimeData | None) -> bool:
+    """Returns True when MIME data carries external files, URLs, text, or images."""
+    if mime is None:
+        return False
+    return bool(
+        mime.hasUrls()
+        or mime.hasText()
+        or mime.hasImage()
+        or mime.hasFormat("application/x-f9sidebar-note-image")
+    )
+
+
+class DroppablePanelSwitchBtn(QPushButton):
+    """Panel switcher pill supporting drag-hover auto-switch and direct external drops."""
+
+    def __init__(
+        self,
+        text: str,
+        panel_index: int,
+        on_hover_switch: Callable[[int], None],
+        on_external_drop: Callable[[int, QMimeData, Qt.KeyboardModifiers], bool],
+        parent: QWidget | None = None,
+    ):
+        super().__init__(text, parent)
+        self.panel_index = int(panel_index)
+        self._on_hover_switch = on_hover_switch
+        self._on_external_drop = on_external_drop
+        self.setAcceptDrops(True)
+
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.setInterval(350)
+        self._hover_timer.timeout.connect(
+            lambda: self._on_hover_switch(self.panel_index)
+        )
+
+    def dragEnterEvent(self, event) -> None:
+        if _is_droppable_mime(event.mimeData()):
+            if not self._hover_timer.isActive():
+                self._hover_timer.start()
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if _is_droppable_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:
+        self._hover_timer.stop()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        self._hover_timer.stop()
+        if not _is_droppable_mime(event.mimeData()):
+            super().dropEvent(event)
+            return
+        self._on_hover_switch(self.panel_index)
+        self._on_external_drop(
+            self.panel_index, event.mimeData(), event.modifiers()
+        )
+        event.acceptProposedAction()
+
+
 class SidebarWindow(QWidget):
     sig_request_restore_focus = Signal()
     sig_profile_changed = Signal(str)
@@ -69,6 +138,8 @@ class SidebarWindow(QWidget):
         self.is_pinned = False
         self._is_closing = False
         self._restoring_state = False
+        self._drag_hover_active = False
+        self._drag_peek_opened = False
         self._last_appbar_rect: QRect | None = None
         self.sidebar_opacity = 100
         self.unread_clips = 0
@@ -82,6 +153,10 @@ class SidebarWindow(QWidget):
         self._opacity_save_timer.setInterval(200)
         self._opacity_save_timer.timeout.connect(self._persist_opacity_setting)
 
+        self._edge_drag_timer = QTimer(self)
+        self._edge_drag_timer.setInterval(120)
+        self._edge_drag_timer.timeout.connect(self._check_edge_drag_peek)
+
         self.setWindowTitle("F9Sidebar")
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -89,12 +164,14 @@ class SidebarWindow(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAcceptDrops(True)
 
         self._setup_styles()
         self._build_ui()
         self._setup_animation()
         self._restore_persisted_state()
         self.refresh_views()
+        self._edge_drag_timer.start()
 
         app = QApplication.instance()
         if app is not None:
@@ -214,7 +291,12 @@ class SidebarWindow(QWidget):
         nav_row = QHBoxLayout()
         nav_row.setSpacing(6)
 
-        self.btn_panel_hub = QPushButton("1. Hub (Shortcuts & Notes)")
+        self.btn_panel_hub = DroppablePanelSwitchBtn(
+            "1. Hub (Shortcuts & Notes)",
+            panel_index=0,
+            on_hover_switch=self.switch_to_panel,
+            on_external_drop=self._handle_panel_button_drop,
+        )
         self.btn_panel_hub.setObjectName("PillBtn")
         self.btn_panel_hub.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.btn_panel_hub.setMinimumHeight(26)
@@ -222,7 +304,12 @@ class SidebarWindow(QWidget):
         self.btn_panel_hub.setChecked(True)
         self.btn_panel_hub.clicked.connect(lambda: self.switch_to_panel(0))
 
-        self.btn_panel_queue = QPushButton("2. Clip Queue (0)")
+        self.btn_panel_queue = DroppablePanelSwitchBtn(
+            "2. Clip Queue (0)",
+            panel_index=1,
+            on_hover_switch=self.switch_to_panel,
+            on_external_drop=self._handle_panel_button_drop,
+        )
         self.btn_panel_queue.setObjectName("PillBtn")
         self.btn_panel_queue.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.btn_panel_queue.setMinimumHeight(26)
@@ -529,9 +616,14 @@ class SidebarWindow(QWidget):
         else:
             self.show_sidebar()
 
-    def show_sidebar(self, target_screen=None) -> None:
+    def show_sidebar(self, target_screen=None, activate: bool = True) -> None:
         self.hooks.remember_foreground_window(int(self.winId()))
         self._is_closing = False
+
+        is_dragging = bool(
+            hasattr(self.hooks, "is_mouse_dragging") and self.hooks.is_mouse_dragging()
+        )
+        should_activate = bool(activate) and not is_dragging
 
         screen = (
             target_screen
@@ -540,18 +632,83 @@ class SidebarWindow(QWidget):
         )
         start_rect, end_rect = self._resolve_target_rects(screen)
 
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, not should_activate)
         self.setGeometry(start_rect)
         self.setWindowOpacity(self.sidebar_opacity / 100.0)
         self.show()
         self.raise_()
-        self.activateWindow()
-        self.search_input.setFocus()
-        self.search_input.selectAll()
+        if should_activate:
+            self._drag_peek_opened = False
+            self.activateWindow()
+            self.search_input.setFocus()
+            self.search_input.selectAll()
+        else:
+            self._drag_peek_opened = True
 
         self.anim.stop()
         self.anim.setStartValue(start_rect)
         self.anim.setEndValue(end_rect)
         self.anim.start()
+
+    def _is_point_near_dock_edge(
+        self, pos: QPoint, avail: QRect, margin: int = 10
+    ) -> bool:
+        edge = (self.dock_edge or "right").lower()
+        x = int(pos.x())
+        y = int(pos.y())
+        in_y_band = (avail.top() - margin) <= y <= (avail.bottom() + margin)
+        in_x_band = (avail.left() - margin) <= x <= (avail.right() + margin)
+        if edge == "left":
+            return in_y_band and (avail.left() - margin) <= x <= (avail.left() + margin)
+        if edge == "top":
+            return in_x_band and (avail.top() - margin) <= y <= (avail.top() + margin)
+        if edge == "bottom":
+            return in_x_band and (avail.bottom() - margin) <= y <= (avail.bottom() + margin)
+        return in_y_band and (avail.right() - margin) <= x <= (avail.right() + margin)
+
+    def _check_edge_drag_peek(self, cursor_pos: QPoint | None = None) -> bool:
+        is_dragging = bool(
+            hasattr(self.hooks, "is_mouse_dragging") and self.hooks.is_mouse_dragging()
+        )
+        pos = cursor_pos if cursor_pos is not None else QCursor.pos()
+        if not self.isVisible() or self._is_closing:
+            if is_dragging:
+                screen = (
+                    QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
+                )
+                avail = self._get_clean_available_geometry(screen)
+                if self._is_point_near_dock_edge(pos, avail):
+                    self._drag_peek_opened = True
+                    self.show_sidebar(target_screen=screen, activate=False)
+                    return True
+            return False
+
+        if (
+            self._drag_peek_opened
+            and not is_dragging
+            and not self._drag_hover_active
+            and not self.is_pinned
+            and not self.appbar_enabled
+        ):
+            if not self.frameGeometry().contains(pos):
+                self._drag_peek_opened = False
+                self.hide_sidebar(restore_focus=False)
+                return False
+        return True
+
+    def _handle_panel_button_drop(
+        self, panel_index: int, mime_data: QMimeData, modifiers: Qt.KeyboardModifiers
+    ) -> bool:
+        self._drag_hover_active = False
+        idx = 1 if int(panel_index) == 1 else 0
+        self.switch_to_panel(idx)
+        if idx == 0 and hasattr(self.panel_hub, "handle_external_shortcut_drop"):
+            self.panel_hub.handle_external_shortcut_drop(mime_data, modifiers)
+            return True
+        if idx == 1 and hasattr(self.panel_queue, "handle_external_drop"):
+            self.panel_queue.handle_external_drop(mime_data, modifiers)
+            return True
+        return False
 
     def hide_sidebar(self, restore_focus: bool = True) -> None:
         if not self.isVisible() or self._is_closing:
@@ -728,6 +885,34 @@ class SidebarWindow(QWidget):
             return
         super().keyPressEvent(event)
 
+    def dragEnterEvent(self, event) -> None:
+        if _is_droppable_mime(event.mimeData()):
+            self._drag_hover_active = True
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if _is_droppable_mime(event.mimeData()):
+            self._drag_hover_active = True
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:
+        self._drag_hover_active = False
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        self._drag_hover_active = False
+        if _is_droppable_mime(event.mimeData()):
+            if self._handle_panel_button_drop(
+                self.stack.currentIndex(), event.mimeData(), event.modifiers()
+            ):
+                event.acceptProposedAction()
+                return
+        super().dropEvent(event)
+
     def changeEvent(self, event: QEvent) -> None:
         if (
             event.type() == QEvent.Type.WindowDeactivate
@@ -736,10 +921,19 @@ class SidebarWindow(QWidget):
             and self.isVisible()
             and not self._is_closing
         ):
-            self.hide_sidebar(restore_focus=False)
+            is_dragging = self._drag_hover_active or bool(
+                hasattr(self.hooks, "is_mouse_dragging")
+                and self.hooks.is_mouse_dragging()
+            )
+            if is_dragging:
+                self._drag_peek_opened = True
+            else:
+                self.hide_sidebar(restore_focus=False)
         super().changeEvent(event)
 
     def closeEvent(self, event) -> None:
+        if hasattr(self, "_edge_drag_timer") and self._edge_drag_timer.isActive():
+            self._edge_drag_timer.stop()
         self.flush_pending_state()
         self._unregister_appbar_if_needed()
         super().closeEvent(event)

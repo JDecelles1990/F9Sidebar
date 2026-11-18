@@ -21,6 +21,8 @@ MOD_NOREPEAT = 0x4000
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 
+VK_LBUTTON = 0x01
+VK_RBUTTON = 0x02
 VK_F9 = 0x78
 VK_CONTROL = 0x11
 VK_MENU = 0x12
@@ -128,7 +130,21 @@ class Win32HookManager(QObject):
         self._force_window_push_in_tests: bool = False
         self._paste_seq: int = 0
         self._paste_backup_mime: QMimeData | None = None
+        self._simulated_mouse_dragging: bool | None = None
         self._filter = _NativeHotkeyFilter(self._on_wm_hotkey)
+
+    def is_mouse_dragging(self) -> bool:
+        """Returns True while the primary or secondary mouse button is physically held down."""
+        if self._simulated_mouse_dragging is not None:
+            return bool(self._simulated_mouse_dragging)
+        if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+            return False
+        try:
+            l_down = bool(self.user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
+            r_down = bool(self.user32.GetAsyncKeyState(VK_RBUTTON) & 0x8000)
+            return l_down or r_down
+        except Exception:
+            return False
 
     def install(self, app: QApplication, window_hwnd: int) -> None:
         """Installs the event filter and registers global F9 hotkeys."""

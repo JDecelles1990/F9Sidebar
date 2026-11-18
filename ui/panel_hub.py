@@ -10,6 +10,7 @@ import urllib.parse
 from PySide6.QtCore import (
     QBuffer,
     QEvent,
+    QFileInfo,
     QIODevice,
     QMimeData,
     QPoint,
@@ -211,7 +212,197 @@ def _derive_title(target: str) -> str:
         parsed = urllib.parse.urlparse(cleaned)
         return parsed.netloc or cleaned
     p = Path(cleaned)
+    try:
+        if p.is_dir():
+            return p.name or cleaned
+    except OSError:
+        pass
     return p.stem or p.name or cleaned
+
+
+def _normalize_shortcut_target(target: str) -> str:
+    cleaned = str(target or "").strip().strip('"')
+    if not cleaned:
+        return ""
+    if cleaned.lower().startswith(("http://", "https://")):
+        parsed = urllib.parse.urlsplit(cleaned)
+        scheme = parsed.scheme.lower()
+        netloc = parsed.netloc.lower()
+        path = parsed.path or ""
+        if path == "/":
+            path = ""
+        return urllib.parse.urlunsplit(
+            (scheme, netloc, path, parsed.query, parsed.fragment)
+        )
+    return os.path.normcase(os.path.normpath(cleaned))
+
+
+def unwrap_windows_shortcut(path_str: str) -> Tuple[str, str]:
+    """Resolves .url and .lnk Windows shortcuts to (derived_title, resolved_target)."""
+    raw = str(path_str or "").strip().strip('"')
+    if not raw:
+        return "", ""
+    p = Path(raw)
+    suffix = p.suffix.lower()
+
+    if suffix == ".url":
+        title = p.stem or p.name or raw
+        try:
+            if p.is_file():
+                raw_bytes = p.read_bytes()
+                if raw_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
+                    text = raw_bytes.decode("utf-16", errors="ignore")
+                else:
+                    text = raw_bytes.decode("utf-8", errors="ignore")
+                match = re.search(
+                    r"^\s*URL\s*=\s*(.+?)\s*$",
+                    text,
+                    flags=re.IGNORECASE | re.MULTILINE,
+                )
+                if match and match.group(1).strip():
+                    return title, match.group(1).strip()
+        except OSError:
+            pass
+        return title, raw
+
+    if suffix == ".lnk":
+        title = p.stem or p.name or raw
+        try:
+            sym = QFileInfo(raw).symLinkTarget()
+            if sym:
+                return title, str(Path(sym))
+        except Exception:
+            pass
+        try:
+            if p.is_file():
+                data = p.read_bytes()
+                candidates: List[str] = []
+                utf16_text = data.decode("utf-16-le", errors="ignore")
+                for m in re.findall(r"https?://[^\x00\r\n\"\s]{4,}", utf16_text):
+                    candidates.append(m.strip())
+                for m in re.findall(rb"https?://[^\x00\r\n\"\s]{4,}", data):
+                    candidates.append(m.decode("ascii", errors="ignore").strip())
+                for m in re.findall(
+                    r"[A-Za-z]:\\[^\x00\r\n\"<>|]{2,}", utf16_text
+                ):
+                    candidates.append(m.strip())
+                for m in re.findall(
+                    rb"[A-Za-z]:\\[^\x00\r\n\"<>|]{2,}", data
+                ):
+                    candidates.append(m.decode("cp1252", errors="ignore").strip())
+
+                valid_urls = [
+                    c for c in candidates if c.lower().startswith(("http://", "https://"))
+                ]
+                if valid_urls:
+                    return title, valid_urls[0]
+
+                file_paths = []
+                dir_paths = []
+                for cand in candidates:
+                    try:
+                        cp = Path(cand)
+                        if cp.is_file():
+                            file_paths.append(str(cp))
+                        elif cp.is_dir():
+                            dir_paths.append(str(cp))
+                    except OSError:
+                        pass
+                if file_paths:
+                    return title, file_paths[0]
+                if dir_paths:
+                    return title, dir_paths[0]
+                # Prefer a path with a file extension over bare dir strings if none exist on disk.
+                for cand in candidates:
+                    if Path(cand).suffix:
+                        return title, str(Path(cand))
+                if candidates:
+                    return title, str(Path(candidates[0]))
+        except OSError:
+            pass
+        return title, raw
+
+    try:
+        if p.is_dir():
+            return (p.name or raw), raw
+    except OSError:
+        pass
+    return (p.stem or p.name or raw), raw
+
+
+def extract_shortcut_candidates_from_mime(
+    mime: Optional[QMimeData],
+) -> List[Tuple[str, str, str]]:
+    """Extracts unique (title, target, category) shortcut tuples from external MIME data."""
+    if mime is None:
+        return []
+    if mime.hasFormat(_SHORTCUT_MIME_TYPE) and not mime.hasUrls() and not mime.hasText():
+        return []
+
+    raw_items: List[Tuple[str, str, str]] = []
+
+    if mime.hasUrls():
+        for url in mime.urls():
+            if url.isLocalFile():
+                local_path = str(Path(url.toLocalFile()))
+                title, resolved = unwrap_windows_shortcut(local_path)
+                is_web = resolved.lower().startswith(("http://", "https://"))
+                if not is_web:
+                    resolved = str(Path(resolved))
+                prefer_folder = False
+                if not is_web:
+                    try:
+                        prefer_folder = Path(resolved).is_dir()
+                    except OSError:
+                        prefer_folder = False
+                cat = _infer_category(resolved, prefer_folder=prefer_folder)
+                raw_items.append((title or _derive_title(resolved), resolved, cat))
+            else:
+                raw_url = url.toString().strip()
+                if raw_url.lower().startswith(("http://", "https://")):
+                    raw_items.append((_derive_title(raw_url), raw_url, "url"))
+
+    if not raw_items and mime.hasText():
+        for raw_line in mime.text().splitlines():
+            cleaned = raw_line.strip().strip('"')
+            if not cleaned:
+                continue
+            if cleaned.lower().startswith(("http://", "https://")):
+                raw_items.append((_derive_title(cleaned), cleaned, "url"))
+                continue
+            if len(cleaned) < 4096:
+                try:
+                    p = Path(cleaned)
+                    is_candidate = (
+                        p.is_absolute()
+                        or p.exists()
+                        or cleaned.lower().endswith((".lnk", ".url"))
+                    )
+                except OSError:
+                    is_candidate = False
+                if is_candidate:
+                    title, resolved = unwrap_windows_shortcut(cleaned)
+                    is_web = resolved.lower().startswith(("http://", "https://"))
+                    if not is_web:
+                        resolved = str(Path(resolved))
+                    prefer_folder = False
+                    if not is_web:
+                        try:
+                            prefer_folder = Path(resolved).is_dir()
+                        except OSError:
+                            prefer_folder = False
+                    cat = _infer_category(resolved, prefer_folder=prefer_folder)
+                    raw_items.append((title or _derive_title(resolved), resolved, cat))
+
+    deduped: List[Tuple[str, str, str]] = []
+    seen_norm = set()
+    for title, target, cat in raw_items:
+        norm = _normalize_shortcut_target(target)
+        if not norm or norm in seen_norm:
+            continue
+        seen_norm.add(norm)
+        deduped.append((title, target, cat))
+    return deduped
 
 
 class ShortcutDialog(QDialog):
@@ -385,17 +576,21 @@ def _register_data_uri_images(doc: QTextDocument, html_text: str) -> None:
 
 
 class DraggableShortcutTile(QToolButton):
-    """Shortcut icon tile supporting click launch and drag-and-drop reordering."""
+    """Shortcut icon tile supporting click launch, drag reordering, and external drops."""
 
     def __init__(
         self,
         shortcut_id: int,
         on_drop_reorder: Callable[[int, int], None],
+        on_external_drop: Optional[Callable[[QMimeData, Qt.KeyboardModifiers], None]] = None,
+        on_drag_hover_state: Optional[Callable[[bool], None]] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
         self.shortcut_id = int(shortcut_id)
         self._on_drop_reorder = on_drop_reorder
+        self._on_external_drop = on_external_drop
+        self._on_drag_hover_state = on_drag_hover_state
         self._drag_start_pos: Optional[QPoint] = None
         self.setAcceptDrops(True)
 
@@ -428,26 +623,95 @@ class DraggableShortcutTile(QToolButton):
         if event.mimeData().hasFormat(_SHORTCUT_MIME_TYPE):
             event.acceptProposedAction()
             return
+        if extract_shortcut_candidates_from_mime(event.mimeData()):
+            if self._on_drag_hover_state is not None:
+                self._on_drag_hover_state(True)
+            event.acceptProposedAction()
+            return
         super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event) -> None:
         if event.mimeData().hasFormat(_SHORTCUT_MIME_TYPE):
             event.acceptProposedAction()
             return
+        if extract_shortcut_candidates_from_mime(event.mimeData()):
+            if self._on_drag_hover_state is not None:
+                self._on_drag_hover_state(True)
+            event.acceptProposedAction()
+            return
         super().dragMoveEvent(event)
 
+    def dragLeaveEvent(self, event) -> None:
+        if self._on_drag_hover_state is not None:
+            self._on_drag_hover_state(False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event) -> None:
-        if not event.mimeData().hasFormat(_SHORTCUT_MIME_TYPE):
-            super().dropEvent(event)
+        if self._on_drag_hover_state is not None:
+            self._on_drag_hover_state(False)
+        if event.mimeData().hasFormat(_SHORTCUT_MIME_TYPE):
+            raw = bytes(event.mimeData().data(_SHORTCUT_MIME_TYPE)).decode("utf-8", errors="ignore")
+            try:
+                source_id = int(raw)
+            except ValueError:
+                return
+            if source_id != self.shortcut_id:
+                self._on_drop_reorder(source_id, self.shortcut_id)
+            event.acceptProposedAction()
             return
-        raw = bytes(event.mimeData().data(_SHORTCUT_MIME_TYPE)).decode("utf-8", errors="ignore")
-        try:
-            source_id = int(raw)
-        except ValueError:
+        if (
+            self._on_external_drop is not None
+            and extract_shortcut_candidates_from_mime(event.mimeData())
+        ):
+            self._on_external_drop(event.mimeData(), event.modifiers())
+            event.acceptProposedAction()
             return
-        if source_id != self.shortcut_id:
-            self._on_drop_reorder(source_id, self.shortcut_id)
-        event.acceptProposedAction()
+        super().dropEvent(event)
+
+
+class DroppableGridScrollArea(QScrollArea):
+    """Scroll area accepting external files, folders, shortcuts, and URLs into the grid."""
+
+    def __init__(
+        self,
+        on_external_drop: Callable[[QMimeData, Qt.KeyboardModifiers], None],
+        on_drag_hover_state: Optional[Callable[[bool], None]] = None,
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self._on_external_drop = on_external_drop
+        self._on_drag_hover_state = on_drag_hover_state
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:
+        if extract_shortcut_candidates_from_mime(event.mimeData()):
+            if self._on_drag_hover_state is not None:
+                self._on_drag_hover_state(True)
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if extract_shortcut_candidates_from_mime(event.mimeData()):
+            if self._on_drag_hover_state is not None:
+                self._on_drag_hover_state(True)
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:
+        if self._on_drag_hover_state is not None:
+            self._on_drag_hover_state(False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        if self._on_drag_hover_state is not None:
+            self._on_drag_hover_state(False)
+        if extract_shortcut_candidates_from_mime(event.mimeData()):
+            self._on_external_drop(event.mimeData(), event.modifiers())
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
 
 
 class _ImagePreviewCanvas(QWidget):
@@ -1179,11 +1443,42 @@ class RichNoteEditor(QTextEdit):
         return None
 
     def canInsertFromMimeData(self, source: QMimeData) -> bool:
-        if source.hasImage() or self._extract_image_from_mime(source) is not None:
+        if source is not None and (
+            source.hasUrls()
+            or source.hasImage()
+            or self._extract_image_from_mime(source) is not None
+        ):
             return True
         return super().canInsertFromMimeData(source)
 
     def insertFromMimeData(self, source: QMimeData) -> None:
+        if source is None:
+            return
+        if source.hasUrls() and source.urls():
+            urls = source.urls()
+            has_local = any(u.isLocalFile() for u in urls)
+            if has_local or not source.hasImage():
+                for idx, url in enumerate(urls):
+                    if url.isLocalFile():
+                        p = Path(url.toLocalFile())
+                        if p.suffix.lower() in _IMAGE_EXTS and p.is_file():
+                            img = QImage(str(p))
+                            if not img.isNull():
+                                if idx > 0:
+                                    self.textCursor().insertText("\n")
+                                self.insert_image(img)
+                                continue
+                        if idx > 0:
+                            self.textCursor().insertText("\n")
+                        self.textCursor().insertText(str(p))
+                    else:
+                        raw_url = url.toString().strip()
+                        if raw_url:
+                            if idx > 0:
+                                self.textCursor().insertText("\n")
+                            self.textCursor().insertText(raw_url)
+                return
+
         image = self._extract_image_from_mime(source)
         if image is None and source.hasImage():
             clip_img = QApplication.clipboard().image()
@@ -1984,19 +2279,21 @@ class NoteHistoryDialog(QDialog):
 
 
 class DroppableNoteTabBtn(QToolButton):
-    """Bottom note tab button accepting dragged images and hover tab switching."""
+    """Bottom note tab button accepting dragged images, external items, and hover switching."""
 
     def __init__(
         self,
         tab_id: int,
         on_image_dropped: Callable[[int, bytes, bool], None],
         on_drag_hover_switch: Callable[[int], None],
+        on_external_dropped: Optional[Callable[[int, QMimeData], bool]] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
         self.tab_id = int(tab_id)
         self._on_image_dropped = on_image_dropped
         self._on_drag_hover_switch = on_drag_hover_switch
+        self._on_external_dropped = on_external_dropped
         self.setAcceptDrops(True)
 
         self._hover_timer = QTimer(self)
@@ -2006,8 +2303,18 @@ class DroppableNoteTabBtn(QToolButton):
             lambda: self._on_drag_hover_switch(self.tab_id)
         )
 
+    @staticmethod
+    def _is_droppable_mime(mime: Optional[QMimeData]) -> bool:
+        if mime is None:
+            return False
+        if mime.hasFormat(_NOTE_IMAGE_MIME_TYPE):
+            return True
+        if mime.hasFormat(_SHORTCUT_MIME_TYPE) and not mime.hasUrls() and not mime.hasText():
+            return False
+        return bool(mime.hasUrls() or mime.hasText() or mime.hasImage())
+
     def dragEnterEvent(self, event) -> None:
-        if event.mimeData().hasFormat(_NOTE_IMAGE_MIME_TYPE):
+        if self._is_droppable_mime(event.mimeData()):
             if not self._hover_timer.isActive():
                 self._hover_timer.start()
             event.acceptProposedAction()
@@ -2015,7 +2322,7 @@ class DroppableNoteTabBtn(QToolButton):
         super().dragEnterEvent(event)
 
     def dragMoveEvent(self, event) -> None:
-        if event.mimeData().hasFormat(_NOTE_IMAGE_MIME_TYPE):
+        if self._is_droppable_mime(event.mimeData()):
             event.acceptProposedAction()
             return
         super().dragMoveEvent(event)
@@ -2026,16 +2333,23 @@ class DroppableNoteTabBtn(QToolButton):
 
     def dropEvent(self, event) -> None:
         self._hover_timer.stop()
-        if not event.mimeData().hasFormat(_NOTE_IMAGE_MIME_TYPE):
-            super().dropEvent(event)
+        if event.mimeData().hasFormat(_NOTE_IMAGE_MIME_TYPE):
+            raw = bytes(event.mimeData().data(_NOTE_IMAGE_MIME_TYPE))
+            copy_only = (
+                bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                or event.proposedAction() == Qt.DropAction.CopyAction
+            )
+            self._on_image_dropped(self.tab_id, raw, copy_only)
+            event.acceptProposedAction()
             return
-        raw = bytes(event.mimeData().data(_NOTE_IMAGE_MIME_TYPE))
-        copy_only = (
-            bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-            or event.proposedAction() == Qt.DropAction.CopyAction
-        )
-        self._on_image_dropped(self.tab_id, raw, copy_only)
-        event.acceptProposedAction()
+        if self._on_external_dropped is not None and self._is_droppable_mime(
+            event.mimeData()
+        ):
+            self._on_drag_hover_switch(self.tab_id)
+            self._on_external_dropped(self.tab_id, event.mimeData())
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
 
 
 class PanelHub(QWidget):
@@ -2056,6 +2370,7 @@ class PanelHub(QWidget):
         self._loading_note = False
         self._restoring_state = False
         self._last_highlight_color = QColor("#F9E2AF")
+        self._last_flashed_shortcut_id: Optional[int] = None
         self._shortcut_buttons: Dict[int, QToolButton] = {}
         self._tab_buttons: Dict[int, tuple[QToolButton, str]] = {}
         self._tab_shortcuts: List[QShortcut] = []
@@ -2302,7 +2617,10 @@ class PanelHub(QWidget):
         grid_header.addWidget(self.btn_add_shortcut)
         top_layout.addLayout(grid_header)
 
-        self.grid_scroll = QScrollArea()
+        self.grid_scroll = DroppableGridScrollArea(
+            on_external_drop=self.handle_external_shortcut_drop,
+            on_drag_hover_state=self._set_grid_drop_highlight,
+        )
         self.grid_scroll.setObjectName("GridScroll")
         self.grid_scroll.setWidgetResizable(True)
         self.grid_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -2610,6 +2928,8 @@ class PanelHub(QWidget):
         btn = DraggableShortcutTile(
             sid,
             on_drop_reorder=self._reorder_shortcut_ids,
+            on_external_drop=self.handle_external_shortcut_drop,
+            on_drag_hover_state=self._set_grid_drop_highlight,
             parent=self.grid_container,
         )
         btn.setObjectName("ShortcutTile")
@@ -2721,6 +3041,114 @@ class PanelHub(QWidget):
                     self._refresh_shortcuts_grid()
 
         self._run_with_pin_guard(_open_dialog)
+
+    def _set_grid_drop_highlight(self, active: bool) -> None:
+        if active:
+            self.grid_scroll.setStyleSheet(
+                "QScrollArea#GridScroll { background-color: #2A2D3E; "
+                "border: 2px dashed #89B4FA; border-radius: 6px; }"
+            )
+        else:
+            self.grid_scroll.setStyleSheet("")
+
+    def flash_shortcut_tile(self, shortcut_id: int) -> bool:
+        """Briefly highlights a shortcut tile border to acknowledge add/duplicate drop."""
+        sid = int(shortcut_id)
+        self._last_flashed_shortcut_id = sid
+        btn = self._shortcut_buttons.get(sid)
+        if btn is None or not _qt_is_valid(btn):
+            return False
+        flash_qss = (
+            "border: 2px solid #89B4FA; background-color: #363A4F; border-radius: 6px;"
+        )
+        btn.setStyleSheet(flash_qss)
+        QTimer.singleShot(
+            700,
+            lambda b=btn, q=flash_qss: self._clear_tile_flash(b, q),
+        )
+        return True
+
+    @staticmethod
+    def _clear_tile_flash(btn: QToolButton, expected_qss: str) -> None:
+        if _qt_is_valid(btn) and btn.styleSheet() == expected_qss:
+            btn.setStyleSheet("")
+
+    def handle_external_shortcut_drop(
+        self,
+        mime: Optional[QMimeData],
+        modifiers: Qt.KeyboardModifiers = Qt.KeyboardModifier.NoModifier,
+    ) -> List[int]:
+        """Handles external drops of files, folders, .lnk/.url shortcuts, and URLs."""
+        candidates = extract_shortcut_candidates_from_mime(mime)
+        if not candidates:
+            return []
+
+        existing = self.db.get_shortcuts("", sort_by_usage=False)
+        existing_map: Dict[str, int] = {}
+        for s in existing:
+            norm = _normalize_shortcut_target(str(s.get("target", "")))
+            if norm and norm not in existing_map:
+                existing_map[norm] = int(s["id"])
+
+        added_ids: List[int] = []
+        duplicate_ids: List[int] = []
+        shift_held = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+
+        for title, target, category in candidates:
+            norm_key = _normalize_shortcut_target(target)
+            if norm_key and norm_key in existing_map:
+                dup_id = existing_map[norm_key]
+                if dup_id not in duplicate_ids:
+                    duplicate_ids.append(dup_id)
+                continue
+
+            if shift_held:
+                saved_id: Optional[int] = None
+
+                def _open_edit_before_save(
+                    t=title, tgt=target, cat=category
+                ) -> None:
+                    nonlocal saved_id
+                    dlg = ShortcutDialog(
+                        self, title=t, target=tgt, category=cat, is_edit=False
+                    )
+                    if dlg.exec() == QDialog.DialogCode.Accepted:
+                        dlg_title, dlg_target, dlg_category = dlg.get_data()
+                        if dlg_target:
+                            edited_norm = _normalize_shortcut_target(dlg_target)
+                            if edited_norm and edited_norm in existing_map:
+                                dup = existing_map[edited_norm]
+                                if dup not in duplicate_ids:
+                                    duplicate_ids.append(dup)
+                                return
+                            new_sid = self.db.add_shortcut(
+                                dlg_title, dlg_target, category=dlg_category
+                            )
+                            if new_sid != -1:
+                                saved_id = int(new_sid)
+                                if edited_norm:
+                                    existing_map[edited_norm] = saved_id
+
+                self._run_with_pin_guard(_open_edit_before_save)
+                if saved_id is not None:
+                    added_ids.append(saved_id)
+            else:
+                new_sid = self.db.add_shortcut(title, target, category=category)
+                if new_sid != -1:
+                    int_sid = int(new_sid)
+                    added_ids.append(int_sid)
+                    if norm_key:
+                        existing_map[norm_key] = int_sid
+
+        if added_ids:
+            self._refresh_shortcuts_grid()
+            for sid in added_ids:
+                self.flash_shortcut_tile(sid)
+
+        for dup_id in duplicate_ids:
+            self.flash_shortcut_tile(dup_id)
+
+        return added_ids
 
     def _show_shortcut_menu(self, btn: QToolButton, pos, shortcut: Dict) -> None:
         def _open_menu() -> None:
@@ -2835,6 +3263,7 @@ class PanelHub(QWidget):
                 tid,
                 on_image_dropped=self._on_image_dropped_on_tab,
                 on_drag_hover_switch=self._on_note_tab_drag_hover,
+                on_external_dropped=self._on_external_dropped_on_tab,
                 parent=self.rail_widget,
             )
             btn.setObjectName("NoteTabBtn")
@@ -2908,6 +3337,28 @@ class PanelHub(QWidget):
         if btn_entry is not None:
             btn_entry[0].setChecked(True)
         self._on_note_tab_clicked(int(tab_id))
+
+    def _on_external_dropped_on_tab(
+        self, target_tab_id: int, mime_data: Optional[QMimeData]
+    ) -> bool:
+        target_tid = int(target_tab_id)
+        if mime_data is None or target_tid not in self._tab_buttons:
+            return False
+        if target_tid != self.active_tab_id:
+            self._on_note_tab_drag_hover(target_tid)
+
+        doc = self.note_editor.document()
+        plain = self.note_editor.toPlainText()
+        has_img = "<img " in self.note_editor.toHtml().lower()
+        end_cursor = QTextCursor(doc)
+        end_cursor.movePosition(QTextCursor.MoveOperation.End)
+        if (plain.strip() or has_img) and not plain.endswith("\n"):
+            end_cursor.insertText("\n")
+        self.note_editor.setTextCursor(end_cursor)
+        self.note_editor.insertFromMimeData(mime_data)
+        self.save_timer.stop()
+        self._save_active_note()
+        return True
 
     def _append_image_to_active_editor(
         self, image: QImage, data_uri: str, width: int, height: int

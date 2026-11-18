@@ -107,6 +107,7 @@ class DatabaseManager:
                     content TEXT NOT NULL,
                     source_type TEXT NOT NULL DEFAULT 'text',
                     is_checked INTEGER NOT NULL DEFAULT 0,
+                    is_pinned INTEGER NOT NULL DEFAULT 0,
                     sort_order INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
@@ -138,6 +139,15 @@ class DatabaseManager:
             if "last_used_at" not in shortcut_cols:
                 conn.execute(
                     "ALTER TABLE shortcuts ADD COLUMN last_used_at TIMESTAMP"
+                )
+
+            clip_cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(clip_queue)").fetchall()
+            }
+            if "is_pinned" not in clip_cols:
+                conn.execute(
+                    "ALTER TABLE clip_queue ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0"
                 )
 
             # Seed or non-destructively upgrade vertical note tabs up to all 9 defaults
@@ -225,34 +235,75 @@ class DatabaseManager:
         if not content:
             return -1
         with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM clip_queue WHERE content = ? ORDER BY id DESC LIMIT 1",
+                (content,),
+            ).fetchone()
             max_order = conn.execute(
                 "SELECT COALESCE(MAX(sort_order), 0) FROM clip_queue"
             ).fetchone()[0]
-            cur = conn.execute(
-                """
-                INSERT INTO clip_queue (content, source_type, is_checked, sort_order)
-                VALUES (?, ?, 0, ?)
-                """,
-                (content, source_type, max_order + 1),
+            if existing is not None:
+                clip_id = int(existing["id"])
+                conn.execute(
+                    """
+                    UPDATE clip_queue
+                    SET source_type = ?, sort_order = ?, created_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (source_type, max_order + 1, clip_id),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    INSERT INTO clip_queue (content, source_type, is_checked, is_pinned, sort_order)
+                    VALUES (?, ?, 0, 0, ?)
+                    """,
+                    (content, source_type, max_order + 1),
+                )
+                clip_id = int(cur.lastrowid)
+            conn.execute(
+                "INSERT OR REPLACE INTO workspace_state (key, value) VALUES ('last_captured_clip_id', ?)",
+                (json.dumps(clip_id),),
             )
-            return cur.lastrowid
+            return clip_id
 
     def get_clips(self, search_query: str = "") -> List[Dict]:
         with self._connect() as conn:
             if search_query.strip():
                 rows = conn.execute(
-                    "SELECT * FROM clip_queue WHERE content LIKE ? ORDER BY sort_order ASC, id ASC",
+                    """
+                    SELECT * FROM clip_queue
+                    WHERE content LIKE ?
+                    ORDER BY COALESCE(is_pinned, 0) DESC, sort_order ASC, id ASC
+                    """,
                     (f"%{search_query.strip()}%",),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM clip_queue ORDER BY sort_order ASC, id ASC"
+                    """
+                    SELECT * FROM clip_queue
+                    ORDER BY COALESCE(is_pinned, 0) DESC, sort_order ASC, id ASC
+                    """
                 ).fetchall()
             return [dict(r) for r in rows]
 
     def get_latest_clip(self) -> Optional[Dict]:
         """Returns the most recently captured clip in clip_queue, or None if empty."""
         with self._connect() as conn:
+            state_row = conn.execute(
+                "SELECT value FROM workspace_state WHERE key = 'last_captured_clip_id'"
+            ).fetchone()
+            if state_row is not None:
+                try:
+                    last_id = int(json.loads(state_row["value"]))
+                    row = conn.execute(
+                        "SELECT * FROM clip_queue WHERE id = ?",
+                        (last_id,),
+                    ).fetchone()
+                    if row is not None:
+                        return dict(row)
+                except Exception:
+                    pass
             row = conn.execute(
                 "SELECT * FROM clip_queue ORDER BY id DESC LIMIT 1"
             ).fetchone()
@@ -263,6 +314,14 @@ class DatabaseManager:
             conn.execute(
                 "UPDATE clip_queue SET is_checked = ? WHERE id = ?",
                 (1 if is_checked else 0, clip_id),
+            )
+
+    def set_clip_pinned(self, clip_id: int, is_pinned: bool) -> None:
+        """Stars or unstars a clip (starred clips float to the top & survive Clear All)."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE clip_queue SET is_pinned = ? WHERE id = ?",
+                (1 if is_pinned else 0, int(clip_id)),
             )
 
     def update_clip(
@@ -295,9 +354,13 @@ class DatabaseManager:
     def clear_clips(self, only_checked: bool = False) -> None:
         with self._connect() as conn:
             if only_checked:
-                conn.execute("DELETE FROM clip_queue WHERE is_checked = 1")
+                conn.execute(
+                    "DELETE FROM clip_queue WHERE is_checked = 1 AND COALESCE(is_pinned, 0) = 0"
+                )
             else:
-                conn.execute("DELETE FROM clip_queue")
+                conn.execute(
+                    "DELETE FROM clip_queue WHERE COALESCE(is_pinned, 0) = 0"
+                )
 
     # --- Panel 1: Shortcuts & Notes Helpers ---
     def get_shortcuts(

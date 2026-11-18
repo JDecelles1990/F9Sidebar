@@ -1,8 +1,21 @@
 import base64
 import html
+import json
+from pathlib import Path
+import re
 from typing import Callable, Dict, List, Optional
 
-from PySide6.QtCore import QBuffer, QEvent, QIODevice, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import (
+    QBuffer,
+    QEvent,
+    QIODevice,
+    QMimeData,
+    QPoint,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+)
 from PySide6.QtGui import (
     QFontMetrics,
     QImage,
@@ -63,6 +76,41 @@ def _encode_image_data_uri(image: QImage) -> str:
     image.save(buf, "PNG")
     b64 = base64.b64encode(bytes(buf.data())).decode("ascii")
     return f"data:image/png;base64,{b64}"
+
+
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+_NOTE_IMAGE_MIME_TYPE = "application/x-f9sidebar-note-image"
+_SHORTCUT_MIME_TYPE = "application/x-f9sidebar-shortcut-id"
+
+
+def _extract_qimage_from_mime(mime: Optional[QMimeData]) -> QImage:
+    if mime is None or not mime.hasImage():
+        return QImage()
+    img_data = mime.imageData()
+    if isinstance(img_data, QImage):
+        return img_data
+    if isinstance(img_data, QPixmap):
+        return img_data.toImage()
+    if isinstance(img_data, (bytes, bytearray)):
+        return QImage.fromData(bytes(img_data))
+    return QImage()
+
+
+def _extract_url_from_url_file(path: Path) -> str:
+    try:
+        raw_bytes = path.read_bytes()
+        if raw_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
+            text = raw_bytes.decode("utf-16", errors="ignore")
+        else:
+            text = raw_bytes.decode("utf-8", errors="ignore")
+        match = re.search(
+            r"^\s*URL\s*=\s*(.+?)\s*$", text, flags=re.IGNORECASE | re.MULTILINE
+        )
+        if match:
+            return match.group(1).strip()
+    except OSError:
+        pass
+    return ""
 
 
 class ElidedTwoLineLabel(QLabel):
@@ -177,6 +225,9 @@ class ClipRowWidget(QWidget):
         on_quick_copy: Optional[Callable[[Dict, "ClipRowWidget"], None]] = None,
         on_edit_saved: Optional[Callable[[int, str], None]] = None,
         on_edit_image: Optional[Callable[[int, str], None]] = None,
+        on_pinned: Optional[Callable[[int, bool], None]] = None,
+        on_paste_active: Optional[Callable[[Dict, "ClipRowWidget"], None]] = None,
+        on_row_context_menu: Optional[Callable[[Dict, "ClipRowWidget", QPoint], None]] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -187,16 +238,22 @@ class ClipRowWidget(QWidget):
         if self.content.strip().startswith("data:image/"):
             self.source_type = "image"
         self.is_checked = bool(clip_data.get("is_checked", 0))
+        self.is_pinned = bool(clip_data.get("is_pinned", 0))
         self._on_quick_copy = on_quick_copy
         self._on_edit_saved = on_edit_saved
         self._on_edit_image = on_edit_image
+        self._on_pinned_cb = on_pinned
+        self._on_paste_active = on_paste_active
+        self._on_row_context_menu = on_row_context_menu
         self._is_editing = False
 
         self.setObjectName("ClipRowWidget")
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu_requested)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(6, 5, 6, 5)
+        layout.setSpacing(4)
 
         # 1. Checkbox synced to db.set_clip_checked
         self.checkbox = QCheckBox()
@@ -259,28 +316,48 @@ class ClipRowWidget(QWidget):
         self.inline_edit.installEventFilter(self)
         layout.addWidget(self.inline_edit, 1)
 
-        # 4. Quick-copy button
+        # 4. Star / Lock favorite button
+        self.btn_pin = QPushButton("★" if self.is_pinned else "☆")
+        self.btn_pin.setObjectName("RowPinBtn")
+        self.btn_pin.setCheckable(True)
+        self.btn_pin.setChecked(self.is_pinned)
+        self.btn_pin.setFixedSize(22, 24)
+        self.btn_pin.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_pin_tooltip()
+        self.btn_pin.toggled.connect(self._handle_pin_toggled)
+        layout.addWidget(self.btn_pin)
+
+        # 5. One-click paste into active window button
+        self.btn_paste = QPushButton("↵")
+        self.btn_paste.setObjectName("RowActionBtn")
+        self.btn_paste.setFixedSize(22, 24)
+        self.btn_paste.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_paste.setToolTip("Paste directly into active window (↵)")
+        self.btn_paste.clicked.connect(self.trigger_paste_active)
+        layout.addWidget(self.btn_paste)
+
+        # 6. Quick-copy button
         self.btn_copy = QPushButton("📋")
         self.btn_copy.setObjectName("RowActionBtn")
-        self.btn_copy.setFixedSize(24, 26)
+        self.btn_copy.setFixedSize(22, 24)
         self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_copy.setToolTip("Quick copy clip to clipboard")
         self.btn_copy.clicked.connect(self.trigger_quick_copy)
         layout.addWidget(self.btn_copy)
 
-        # 5. Inline edit button
+        # 7. Inline edit button
         self.btn_edit = QPushButton("✎")
         self.btn_edit.setObjectName("RowActionBtn")
-        self.btn_edit.setFixedSize(24, 26)
+        self.btn_edit.setFixedSize(22, 24)
         self.btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_edit.setToolTip("Edit clip (Double-click row)")
         self.btn_edit.clicked.connect(self._on_edit_btn_clicked)
         layout.addWidget(self.btn_edit)
 
-        # 6. Promote / Send to Notes button
+        # 8. Promote / Send to Notes button
         self.btn_send_notes = QPushButton("→")
         self.btn_send_notes.setObjectName("RowActionBtn")
-        self.btn_send_notes.setFixedSize(26, 26)
+        self.btn_send_notes.setFixedSize(22, 24)
         self.btn_send_notes.setCursor(Qt.CursorShape.PointingHandCursor)
         if self.source_type in ("url", "path"):
             self.btn_send_notes.setToolTip(
@@ -300,22 +377,48 @@ class ClipRowWidget(QWidget):
             )
         layout.addWidget(self.btn_send_notes)
 
-        # 7. Delete button
+        # 9. Delete button
         self.btn_delete = QPushButton("×")
         self.btn_delete.setObjectName("RowDeleteBtn")
-        self.btn_delete.setFixedSize(24, 26)
+        self.btn_delete.setFixedSize(22, 24)
         self.btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_delete.setToolTip("Delete clip (×)")
         self.btn_delete.clicked.connect(lambda: on_delete(self.clip_id))
         layout.addWidget(self.btn_delete)
 
+    def _update_pin_tooltip(self) -> None:
+        if self.is_pinned:
+            self.btn_pin.setToolTip(
+                "Unstar clip (★) — currently protected from Clear All"
+            )
+        else:
+            self.btn_pin.setToolTip(
+                "Star / Lock clip (☆) — float to top & protect from Clear All"
+            )
+
+    def _handle_pin_toggled(self, pinned: bool) -> None:
+        self.is_pinned = bool(pinned)
+        self.clip_data["is_pinned"] = 1 if self.is_pinned else 0
+        self.btn_pin.setText("★" if self.is_pinned else "☆")
+        self._update_pin_tooltip()
+        if self._on_pinned_cb is not None:
+            self._on_pinned_cb(self.clip_id, self.is_pinned)
+
     def _handle_toggled(self, checked: bool) -> None:
         self.is_checked = checked
         self._on_checked_cb(self.clip_id, checked)
 
+    def trigger_paste_active(self) -> None:
+        if self._on_paste_active is not None:
+            self._on_paste_active(self.clip_data, self)
+
     def trigger_quick_copy(self) -> None:
         if self._on_quick_copy is not None:
             self._on_quick_copy(self.clip_data, self)
+
+    def _on_context_menu_requested(self, pos: QPoint) -> None:
+        if self._on_row_context_menu is not None:
+            self._on_row_context_menu(self.clip_data, self, pos)
 
     def is_editing(self) -> bool:
         return self._is_editing
@@ -394,15 +497,19 @@ class ClipRowWidget(QWidget):
 
 
 class ClipListWidget(QListWidget):
-    """QListWidget configured for InternalMove reordering of custom row widgets."""
+    """QListWidget supporting InternalMove row reordering and external drag-and-drop."""
 
     def __init__(
         self,
         on_rows_reordered: Callable[[], None],
+        on_external_drop: Optional[
+            Callable[[QMimeData, Qt.KeyboardModifiers], List[int]]
+        ] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
         self._on_rows_reordered = on_rows_reordered
+        self._on_external_drop = on_external_drop
         self.setObjectName("ClipList")
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
@@ -414,7 +521,61 @@ class ClipListWidget(QListWidget):
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setSpacing(4)
 
+    @staticmethod
+    def is_external_mime(mime: Optional[QMimeData]) -> bool:
+        if mime is None:
+            return False
+        if (
+            mime.hasFormat(_SHORTCUT_MIME_TYPE)
+            and not mime.hasUrls()
+            and not mime.hasText()
+            and not mime.hasImage()
+        ):
+            return False
+        return bool(
+            mime.hasFormat(_NOTE_IMAGE_MIME_TYPE)
+            or mime.hasUrls()
+            or mime.hasImage()
+            or mime.hasText()
+        )
+
+    def _set_drop_highlight(self, active: bool) -> None:
+        if active:
+            self.setStyleSheet(
+                "QListWidget#ClipList { background-color: #1E1E2E; "
+                "border: 2px dashed #89B4FA; border-radius: 6px; padding: 4px; outline: none; }"
+            )
+        else:
+            self.setStyleSheet("")
+
+    def dragEnterEvent(self, event) -> None:
+        if event.source() is not self and self.is_external_mime(event.mimeData()):
+            self._set_drop_highlight(True)
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if event.source() is not self and self.is_external_mime(event.mimeData()):
+            self._set_drop_highlight(True)
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:
+        self._set_drop_highlight(False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event) -> None:
+        self._set_drop_highlight(False)
+        if (
+            event.source() is not self
+            and self.is_external_mime(event.mimeData())
+            and self._on_external_drop is not None
+        ):
+            self._on_external_drop(event.mimeData(), event.modifiers())
+            event.acceptProposedAction()
+            return
         super().dropEvent(event)
         # Defer until Qt finishes removing the original row from QListWidget.
         QTimer.singleShot(0, self._on_rows_reordered)
@@ -439,6 +600,7 @@ class PanelQueue(QWidget):
         self._restoring_state = False
 
         self.setObjectName("PanelQueue")
+        self.setAcceptDrops(True)
         self._setup_styles()
         self._build_ui()
         self._setup_shortcuts()
@@ -540,7 +702,7 @@ class PanelQueue(QWidget):
                 font-size: 12px;
                 background-color: transparent;
             }
-            QPushButton#RowActionBtn, QPushButton#RowDeleteBtn {
+            QPushButton#RowPinBtn, QPushButton#RowActionBtn, QPushButton#RowDeleteBtn {
                 background-color: #1E1E2E;
                 border: 1px solid #363A4F;
                 border-radius: 4px;
@@ -549,12 +711,25 @@ class PanelQueue(QWidget):
                 font-weight: 700;
                 padding: 0px;
             }
+            QPushButton#RowPinBtn {
+                color: #A6ADC8;
+            }
+            QPushButton#RowPinBtn:hover {
+                background-color: #363A4F;
+                border-color: #F9E2AF;
+                color: #F9E2AF;
+            }
+            QPushButton#RowPinBtn:checked {
+                background-color: #2A2D3E;
+                border: 1px solid #F9E2AF;
+                color: #F9E2AF;
+            }
             QPushButton#RowActionBtn:hover {
                 background-color: #89B4FA;
                 border-color: #89B4FA;
                 color: #1E1E2E;
             }
-            QPushButton#RowActionBtn:focus, QPushButton#RowDeleteBtn:focus {
+            QPushButton#RowPinBtn:focus, QPushButton#RowActionBtn:focus, QPushButton#RowDeleteBtn:focus {
                 border: 1px solid #89B4FA;
             }
             QPushButton#RowDeleteBtn {
@@ -646,7 +821,11 @@ class PanelQueue(QWidget):
         root.addLayout(header_row)
 
         # --- Draggable Checkable Queue ---
-        self.list_widget = ClipListWidget(on_rows_reordered=self._on_rows_reordered, parent=self)
+        self.list_widget = ClipListWidget(
+            on_rows_reordered=self._on_rows_reordered,
+            on_external_drop=self.handle_external_drop,
+            parent=self,
+        )
         root.addWidget(self.list_widget, 1)
 
         # --- Bottom Batch-Copy Assembler Bar ---
@@ -712,6 +891,167 @@ class PanelQueue(QWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def dragEnterEvent(self, event) -> None:
+        if event.source() is not self.list_widget and ClipListWidget.is_external_mime(
+            event.mimeData()
+        ):
+            self.list_widget._set_drop_highlight(True)
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        if event.source() is not self.list_widget and ClipListWidget.is_external_mime(
+            event.mimeData()
+        ):
+            self.list_widget._set_drop_highlight(True)
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:
+        self.list_widget._set_drop_highlight(False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        self.list_widget._set_drop_highlight(False)
+        if event.source() is not self.list_widget and ClipListWidget.is_external_mime(
+            event.mimeData()
+        ):
+            self.handle_external_drop(event.mimeData(), event.modifiers())
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
+
+    def handle_external_drop(
+        self,
+        mime: Optional[QMimeData],
+        modifiers: Qt.KeyboardModifiers = Qt.KeyboardModifier.NoModifier,
+    ) -> List[int]:
+        """Queues dropped files, folders, URLs, text snippets, or images into Panel 2."""
+        if mime is None:
+            return []
+
+        shift_held = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        added_ids: List[int] = []
+
+        def _queue_clip(content: str, src_type: str) -> None:
+            cid = self.db.add_clip(content, src_type)
+            if cid != -1:
+                added_ids.append(int(cid))
+
+        handled = False
+
+        if mime.hasFormat(_NOTE_IMAGE_MIME_TYPE):
+            data_uri = ""
+            try:
+                raw = bytes(mime.data(_NOTE_IMAGE_MIME_TYPE)).decode(
+                    "utf-8", errors="ignore"
+                )
+                payload = json.loads(raw)
+                data_uri = str(payload.get("data_uri") or "").strip()
+            except Exception:
+                data_uri = ""
+            if not data_uri.startswith("data:image/"):
+                img = _extract_qimage_from_mime(mime)
+                if not img.isNull():
+                    data_uri = _encode_image_data_uri(img)
+            if data_uri.startswith("data:image/"):
+                _queue_clip(data_uri, "image")
+                handled = True
+
+        if (
+            not handled
+            and mime.hasImage()
+            and not shift_held
+            and not (mime.hasUrls() and any(u.isLocalFile() for u in mime.urls()))
+        ):
+            img = _extract_qimage_from_mime(mime)
+            if not img.isNull():
+                uri = _encode_image_data_uri(img)
+                if uri:
+                    _queue_clip(uri, "image")
+                    handled = True
+
+        if not handled and mime.hasUrls():
+            for url in mime.urls():
+                if url.isLocalFile():
+                    local_path = str(Path(url.toLocalFile()))
+                    p = Path(local_path)
+                    if not shift_held and p.suffix.lower() in _IMAGE_EXTS and p.is_file():
+                        img = QImage(str(p))
+                        if not img.isNull():
+                            uri = _encode_image_data_uri(img)
+                            if uri:
+                                _queue_clip(uri, "image")
+                                continue
+                    if not shift_held and p.suffix.lower() == ".url" and p.is_file():
+                        parsed_url = _extract_url_from_url_file(p)
+                        if parsed_url:
+                            _queue_clip(parsed_url, "url")
+                            continue
+                    _queue_clip(local_path, "path")
+                else:
+                    raw_url = url.toString().strip()
+                    if raw_url:
+                        src_type = (
+                            "url"
+                            if raw_url.lower().startswith(("http://", "https://"))
+                            else "text"
+                        )
+                        _queue_clip(raw_url, src_type)
+            handled = True
+
+        if not handled and mime.hasImage():
+            img = _extract_qimage_from_mime(mime)
+            if not img.isNull():
+                uri = _encode_image_data_uri(img)
+                if uri:
+                    _queue_clip(uri, "image")
+                    handled = True
+
+        if not handled and mime.hasText():
+            raw_text = mime.text().strip()
+            if raw_text:
+                candidate = raw_text.strip('"')
+                if (
+                    candidate.lower().startswith(("http://", "https://"))
+                    and "\n" not in candidate
+                ):
+                    _queue_clip(candidate, "url")
+                elif "\n" not in candidate and len(candidate) < 4096:
+                    try:
+                        p = Path(candidate)
+                        is_local_path = p.is_absolute() and p.exists()
+                    except OSError:
+                        p = None
+                        is_local_path = False
+                    if is_local_path and p is not None:
+                        img_queued = False
+                        if (
+                            not shift_held
+                            and p.suffix.lower() in _IMAGE_EXTS
+                            and p.is_file()
+                        ):
+                            img = QImage(str(p))
+                            if not img.isNull():
+                                uri = _encode_image_data_uri(img)
+                                if uri:
+                                    _queue_clip(uri, "image")
+                                    img_queued = True
+                        if not img_queued:
+                            _queue_clip(str(p), "path")
+                    else:
+                        _queue_clip(raw_text, "text")
+                else:
+                    _queue_clip(raw_text, "text")
+
+        if added_ids:
+            self.refresh(self.current_query)
+            if self.parent_sidebar and hasattr(self.parent_sidebar, "refresh_views"):
+                self.parent_sidebar.refresh_views()
+        return added_ids
 
     def _on_ctrl_c(self) -> None:
         if self.isVisible():
@@ -783,18 +1123,29 @@ class PanelQueue(QWidget):
             on_quick_copy=self.copy_single_clip,
             on_edit_saved=self._on_edit_clip_saved,
             on_edit_image=self.edit_image_clip,
+            on_pinned=self._on_clip_pinned,
+            on_paste_active=self.paste_single_clip,
+            on_row_context_menu=self._on_row_context_menu,
             parent=self.list_widget,
         )
 
     def _update_summary_controls(self) -> None:
         total = self.list_widget.count()
         checked_in_view = 0
+        unpinned_count = 0
+        checked_unpinned_count = 0
 
         for idx in range(total):
             item = self.list_widget.item(idx)
             data = item.data(Qt.ItemDataRole.UserRole) or {}
-            if data.get("is_checked"):
+            is_chk = bool(data.get("is_checked"))
+            is_pin = bool(data.get("is_pinned"))
+            if is_chk:
                 checked_in_view += 1
+            if not is_pin:
+                unpinned_count += 1
+                if is_chk:
+                    checked_unpinned_count += 1
 
         all_checked = total > 0 and checked_in_view == total
 
@@ -808,11 +1159,18 @@ class PanelQueue(QWidget):
         self.lbl_count.setText(f"{total} {noun}")
         self.lbl_count.setToolTip(f"{checked_in_view} checked out of {total} displayed {noun}")
 
-        self.btn_clear_checked.setEnabled(checked_in_view > 0)
-        self.btn_clear_all.setEnabled(total > 0)
+        self.btn_clear_checked.setEnabled(checked_unpinned_count > 0)
+        self.btn_clear_all.setEnabled(unpinned_count > 0)
 
         self.btn_copy_selected.setText(f"Copy Selected ({checked_in_view})")
         self.btn_copy_selected.setEnabled(checked_in_view > 0)
+
+    def _on_clip_pinned(self, clip_id: int, pinned: bool) -> None:
+        if self._updating_ui:
+            return
+        if hasattr(self.db, "set_clip_pinned"):
+            self.db.set_clip_pinned(clip_id, pinned)
+        self.refresh(self.current_query)
 
     def _on_clip_checked(self, clip_id: int, checked: bool) -> None:
         if self._updating_ui:
@@ -1039,6 +1397,95 @@ class PanelQueue(QWidget):
         if row_widget is not None and hasattr(row_widget, "btn_copy"):
             self._flash_row_button(row_widget.btn_copy, "📋")
 
+    def paste_single_clip(
+        self, clip_data: Dict, row_widget: Optional[ClipRowWidget] = None
+    ) -> bool:
+        """Restores foreground focus and pastes clip directly into the active window."""
+        content = str(clip_data.get("content", ""))
+        src = str(clip_data.get("source_type", "text"))
+        if src == "image" or content.strip().startswith("data:image/"):
+            src = "image"
+        if not content:
+            return False
+
+        if row_widget is not None and hasattr(row_widget, "btn_paste"):
+            self._flash_row_button(row_widget.btn_paste, "↵")
+
+        if self.parent_sidebar is not None:
+            hooks = getattr(self.parent_sidebar, "hooks", None)
+            if (
+                not getattr(self.parent_sidebar, "is_pinned", False)
+                and not getattr(self.parent_sidebar, "appbar_enabled", False)
+                and self.parent_sidebar.isVisible()
+            ):
+                self.parent_sidebar.hide_sidebar(restore_focus=True)
+            elif hooks is not None and hasattr(hooks, "restore_foreground_window"):
+                hooks.restore_foreground_window()
+            if hooks is not None and hasattr(hooks, "paste_into_active_window"):
+                return bool(hooks.paste_into_active_window(content, src))
+
+        self.copy_single_clip(clip_data, row_widget)
+        return True
+
+    def _on_row_context_menu(
+        self, clip_data: Dict, row_widget: ClipRowWidget, pos: QPoint
+    ) -> None:
+        clip_id = int(clip_data["id"])
+        content = str(clip_data.get("content", ""))
+        src = str(clip_data.get("source_type", "text"))
+
+        def _open_menu() -> None:
+            menu = self._create_styled_menu(row_widget)
+            act_paste = menu.addAction("Paste into Active Window (↵)")
+            act_copy = menu.addAction("Copy to Clipboard (📋)")
+            pin_label = (
+                "Unstar Clip (★)" if row_widget.is_pinned else "Star / Lock Clip (☆)"
+            )
+            act_pin = menu.addAction(pin_label)
+            act_edit = menu.addAction("Edit Clip (✎)")
+            menu.addSeparator()
+            act_active_note = menu.addAction("Append to Active Note")
+
+            tabs = self.db.get_note_tabs()
+            tab_actions = {}
+            if tabs:
+                sub = menu.addMenu("Send to Note Tab")
+                sub.setStyleSheet(menu.styleSheet())
+                tab_actions = self._populate_note_tab_menu(sub, tabs)
+
+            act_shortcut = None
+            act_shortcut_edit = None
+            if src in ("url", "path"):
+                act_shortcut = menu.addAction("Add as Shortcut")
+                act_shortcut_edit = menu.addAction("Add as Shortcut (Edit...)")
+
+            menu.addSeparator()
+            act_delete = menu.addAction("Delete Clip (×)")
+
+            chosen = self._exec_menu(menu, row_widget.mapToGlobal(pos))
+            if chosen is None:
+                return
+            if chosen == act_paste:
+                self.paste_single_clip(clip_data, row_widget)
+            elif chosen == act_copy:
+                self.copy_single_clip(clip_data, row_widget)
+            elif chosen == act_pin:
+                row_widget.btn_pin.click()
+            elif chosen == act_edit:
+                row_widget.start_inline_edit()
+            elif chosen == act_active_note:
+                self.promote_clip_to_note(content, target_tab_id=None)
+            elif chosen in tab_actions:
+                self.promote_clip_to_note(content, target_tab_id=tab_actions[chosen])
+            elif act_shortcut is not None and chosen == act_shortcut:
+                self.promote_clip_to_shortcut(content, source_type=src, use_dialog=False)
+            elif act_shortcut_edit is not None and chosen == act_shortcut_edit:
+                self.promote_clip_to_shortcut(content, source_type=src, use_dialog=True)
+            elif chosen == act_delete:
+                self._on_delete_clip(clip_id)
+
+        self._run_with_pin_guard(_open_menu)
+
     def _on_edit_clip_saved(self, clip_id: int, new_content: str) -> None:
         if hasattr(self.db, "update_clip"):
             self.db.update_clip(clip_id, new_content)
@@ -1257,6 +1704,19 @@ class PanelQueue(QWidget):
                     self.list_widget.setItemWidget(item, row_widget)
 
             self._persist_clip_order(updates)
+
+            saw_unpinned = False
+            needs_group_resort = False
+            for _, data in ordered_items:
+                pinned = bool(data.get("is_pinned", 0))
+                if not pinned:
+                    saw_unpinned = True
+                elif saw_unpinned:
+                    needs_group_resort = True
+                    break
+            if needs_group_resort:
+                self.refresh(self.current_query)
+                return
 
         self._update_summary_controls()
 
