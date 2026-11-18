@@ -250,6 +250,10 @@ def main() -> int:
     act_startup.toggled.connect(on_startup_toggled)
     menu.addAction(act_startup)
 
+    act_settings = QAction("Settings && Backup... (Ctrl+,)", menu)
+    act_settings.triggered.connect(sidebar.open_settings_dialog)
+    menu.addAction(act_settings)
+
     menu.addSeparator()
     act_quit = QAction("Quit F9Sidebar", menu)
 

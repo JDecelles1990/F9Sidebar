@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, QTimer
 from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 import qtawesome as qta
@@ -23,6 +23,14 @@ class ToastPopup(QWidget):
         self.hide_timer.setSingleShot(True)
         self.hide_timer.timeout.connect(self.hide)
 
+        self.slide_anim = QPropertyAnimation(self, b"pos", self)
+        self.slide_anim.setDuration(160)
+        self.slide_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self.fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self.fade_anim.setDuration(160)
+        self.fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
         self._setup_styles()
         self._build_ui()
 
@@ -30,8 +38,11 @@ class ToastPopup(QWidget):
         self.setStyleSheet(
             """
             QWidget#ToastPopup {
-                background-color: #2A2D3E;
-                border: 1px solid #89B4FA;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:0.55 #352744, stop:1 #412746
+                );
+                border: 1px solid #FAB387;
                 border-radius: 14px;
                 color: #CDD6F4;
                 font-family: 'Segoe UI', sans-serif;
@@ -66,12 +77,12 @@ class ToastPopup(QWidget):
     @staticmethod
     def _icon_for_source(source_type: str):
         if source_type == "image":
-            return qta.icon("fa5s.image", color="#89B4FA")
+            return qta.icon("fa5s.image", color="#F38BA8")
         if source_type == "url":
-            return qta.icon("fa5s.link", color="#89B4FA")
+            return qta.icon("fa5s.link", color="#FAB387")
         if source_type == "path":
-            return qta.icon("fa5s.folder-open", color="#89B4FA")
-        return qta.icon("fa5s.align-left", color="#CDD6F4")
+            return qta.icon("fa5s.folder-open", color="#F9E2AF")
+        return qta.icon("fa5s.align-left", color="#CBA6F7")
 
     @staticmethod
     def _truncate_preview(content: str, max_chars: int = 42) -> str:
@@ -95,14 +106,34 @@ class ToastPopup(QWidget):
         self.text_label.setText(f"Clipped (#{queue_count}): {preview}")
         self.adjustSize()
 
+        end_pos = self.pos()
         screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         if screen is not None:
             avail = screen.availableGeometry()
             x = avail.right() - self.width() - 16
             y = avail.bottom() - self.height() - 16
-            self.move(x, y)
+            end_pos = QPoint(x, y)
 
+        start_pos = QPoint(end_pos.x(), end_pos.y() + 12)
+        self.slide_anim.stop()
+        self.fade_anim.stop()
+        self.move(start_pos)
+        self.setWindowOpacity(0.15)
         self.show()
         self.raise_()
+
+        self.slide_anim.setStartValue(start_pos)
+        self.slide_anim.setEndValue(end_pos)
+        self.slide_anim.start()
+
+        self.fade_anim.setStartValue(0.15)
+        self.fade_anim.setEndValue(1.0)
+        self.fade_anim.start()
+
         self.hide_timer.start(duration_ms)
+
+    def hideEvent(self, event) -> None:
+        self.slide_anim.stop()
+        self.fade_anim.stop()
+        super().hideEvent(event)
 

@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -37,6 +38,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
     QShortcut,
+    QTextBlockFormat,
     QTextCharFormat,
     QTextCursor,
     QTextDocument,
@@ -110,7 +112,10 @@ def _pick_color_positioned(
     dlg.setStyleSheet(
         """
         QColorDialog {
-            background-color: #1E1E2E;
+            background-color: qlineargradient(
+                x1:0, y1:0, x2:0.4, y2:1,
+                stop:0 #1E1E2E, stop:0.6 #282039, stop:1 #34233E
+            );
             color: #CDD6F4;
             font-family: 'Segoe UI', sans-serif;
         }
@@ -119,14 +124,20 @@ def _pick_color_positioned(
             font-size: 11px;
         }
         QLineEdit, QSpinBox {
-            background-color: #2A2D3E;
+            background-color: qlineargradient(
+                x1:0, y1:0, x2:1, y2:1,
+                stop:0 #2A2D3E, stop:1 #342945
+            );
             border: 1px solid #363A4F;
             border-radius: 4px;
             color: #CDD6F4;
             padding: 2px 4px;
         }
         QPushButton {
-            background-color: #2A2D3E;
+            background-color: qlineargradient(
+                x1:0, y1:0, x2:1, y2:1,
+                stop:0 #2A2D3E, stop:1 #342945
+            );
             border: 1px solid #363A4F;
             border-radius: 5px;
             color: #CDD6F4;
@@ -136,7 +147,7 @@ def _pick_color_positioned(
         }
         QPushButton:hover {
             background-color: #363A4F;
-            border-color: #89B4FA;
+            border-color: #FAB387;
         }
         """
     )
@@ -218,6 +229,27 @@ def _derive_title(target: str) -> str:
     except OSError:
         pass
     return p.stem or p.name or cleaned
+
+
+def expand_note_template_variables(
+    text: str,
+    clipboard_text: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> str:
+    """Expands {{date}}, {{time}}, {{datetime}}, and {{clipboard}} placeholders."""
+    if not text:
+        return ""
+    dt = now or datetime.now()
+    if clipboard_text is not None:
+        clip_val = clipboard_text
+    else:
+        app = QApplication.instance()
+        clip_val = app.clipboard().text() if app is not None else ""
+    result = text.replace("{{date}}", dt.strftime("%Y-%m-%d"))
+    result = result.replace("{{time}}", dt.strftime("%H:%M"))
+    result = result.replace("{{datetime}}", dt.strftime("%Y-%m-%d %H:%M"))
+    result = result.replace("{{clipboard}}", clip_val)
+    return result
 
 
 def _normalize_shortcut_target(target: str) -> str:
@@ -430,7 +462,10 @@ class ShortcutDialog(QDialog):
         self.setStyleSheet(
             """
             QDialog {
-                background-color: #1E1E2E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:0.4, y2:1,
+                    stop:0 #1E1E2E, stop:0.6 #282039, stop:1 #34233E
+                );
                 color: #CDD6F4;
                 font-family: 'Segoe UI', sans-serif;
             }
@@ -439,7 +474,10 @@ class ShortcutDialog(QDialog):
                 font-size: 12px;
             }
             QLineEdit {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342945
+                );
                 border: 1px solid #363A4F;
                 border-radius: 5px;
                 padding: 6px 8px;
@@ -447,10 +485,13 @@ class ShortcutDialog(QDialog):
                 font-size: 12px;
             }
             QLineEdit:focus {
-                border-color: #89B4FA;
+                border-color: #FAB387;
             }
             QPushButton {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342945
+                );
                 border: 1px solid #363A4F;
                 border-radius: 5px;
                 color: #CDD6F4;
@@ -460,7 +501,7 @@ class ShortcutDialog(QDialog):
             }
             QPushButton:hover {
                 background-color: #363A4F;
-                border-color: #89B4FA;
+                border-color: #FAB387;
             }
             """
         )
@@ -922,7 +963,10 @@ class ImageEditDialog(QDialog):
         self.setStyleSheet(
             """
             QDialog {
-                background-color: #1E1E2E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:0.4, y2:1,
+                    stop:0 #1E1E2E, stop:0.6 #282039, stop:1 #34233E
+                );
                 color: #CDD6F4;
                 font-family: 'Segoe UI', sans-serif;
             }
@@ -931,12 +975,15 @@ class ImageEditDialog(QDialog):
                 font-size: 12px;
             }
             QLabel#ImageMetaLabel {
-                color: #A6ADC8;
+                color: #FAB387;
                 font-size: 11px;
                 font-weight: 600;
             }
             QSpinBox {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342945
+                );
                 border: 1px solid #363A4F;
                 border-radius: 5px;
                 padding: 3px 6px;
@@ -944,7 +991,7 @@ class ImageEditDialog(QDialog):
                 font-size: 12px;
             }
             QSpinBox:focus {
-                border-color: #89B4FA;
+                border-color: #FAB387;
             }
             QCheckBox {
                 color: #CDD6F4;
@@ -952,7 +999,10 @@ class ImageEditDialog(QDialog):
                 spacing: 6px;
             }
             QPushButton {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342945
+                );
                 border: 1px solid #363A4F;
                 border-radius: 5px;
                 color: #CDD6F4;
@@ -962,11 +1012,14 @@ class ImageEditDialog(QDialog):
             }
             QPushButton:hover {
                 background-color: #363A4F;
-                border-color: #89B4FA;
+                border-color: #FAB387;
             }
             QPushButton:checked {
-                background-color: #89B4FA;
-                border-color: #89B4FA;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #F9E2AF, stop:0.5 #FAB387, stop:1 #F38BA8
+                );
+                border-color: #CBA6F7;
                 color: #1E1E2E;
             }
             QPushButton#DangerBtn {
@@ -979,12 +1032,15 @@ class ImageEditDialog(QDialog):
                 color: #1E1E2E;
             }
             QWidget#ImageDialogTopBar {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #362947
+                );
                 border: 1px solid #363A4F;
                 border-radius: 6px;
             }
             QLabel#ImageDialogTitle {
-                color: #CDD6F4;
+                color: #F9E2AF;
                 font-size: 12px;
                 font-weight: 700;
             }
@@ -1916,7 +1972,96 @@ class RichNoteEditor(QTextEdit):
         if has_clip_img:
             act_paste_img = menu.addAction("Paste Image")
             act_paste_img.triggered.connect(self.paste_image_from_clipboard)
+
+        menu.addSeparator()
+        act_timestamp = menu.addAction("Insert Timestamp (Ctrl+Shift+T)")
+        act_timestamp.triggered.connect(lambda: self.insert_timestamp())
+
+        act_code = menu.addAction("Toggle Code Block (Ctrl+Shift+K)")
+        act_code.triggered.connect(lambda: self.toggle_code_block())
+
+        tpl_menu = menu.addMenu("Insert Template Variable")
+        for tok, desc in (
+            ("{{date}}", "{{date}} — Current Date"),
+            ("{{time}}", "{{time}} — Current Time"),
+            ("{{datetime}}", "{{datetime}} — Date & Time"),
+            ("{{clipboard}}", "{{clipboard}} — Clipboard Text"),
+        ):
+            act_tok = tpl_menu.addAction(desc)
+            act_tok.triggered.connect(
+                lambda _chk=False, t=tok: self.insert_template_variable(t)
+            )
+
+        hub = self._find_parent_hub()
+        if hub is not None and hasattr(hub, "export_active_note"):
+            menu.addSeparator()
+            act_export = menu.addAction("Export Note (.md / .html / .txt)...")
+            act_export.triggered.connect(lambda: hub.export_active_note())
+            act_import = menu.addAction("Import File into Note...")
+            act_import.triggered.connect(lambda: hub.import_into_active_note())
+
         menu.exec(event.globalPos())
+
+    def insert_timestamp(self, now: Optional[datetime] = None) -> str:
+        """Inserts formatted timestamp at cursor position and returns it."""
+        stamp = (now or datetime.now()).strftime("%Y-%m-%d %H:%M")
+        self.textCursor().insertText(stamp)
+        return stamp
+
+    def insert_template_variable(self, token: str) -> str:
+        """Inserts a dynamic template placeholder such as {{date}} at the cursor."""
+        self.textCursor().insertText(token)
+        return token
+
+    def toggle_code_block(self) -> bool:
+        """Toggles monospace dark code-block styling on selected or current paragraph(s)."""
+        doc = self.document()
+        cursor = self.textCursor()
+        start_block_num = doc.findBlock(cursor.selectionStart()).blockNumber()
+        end_block_num = doc.findBlock(cursor.selectionEnd()).blockNumber()
+
+        first_block = doc.findBlockByNumber(start_block_num)
+        bg_color = first_block.blockFormat().background().color().name().lower()
+        enabling = bg_color != "#181526"
+
+        blk_fmt = QTextBlockFormat()
+        char_fmt = QTextCharFormat()
+        if enabling:
+            blk_fmt.setBackground(QColor("#181526"))
+            blk_fmt.setLeftMargin(6)
+            blk_fmt.setRightMargin(6)
+            blk_fmt.setTopMargin(4)
+            blk_fmt.setBottomMargin(4)
+            char_fmt.setFontFamilies(["Consolas", "Courier New", "monospace"])
+            char_fmt.setForeground(QColor("#F9E2AF"))
+            self.mark_rich_formatting()
+        else:
+            blk_fmt.setBackground(QBrush(Qt.BrushStyle.NoBrush))
+            blk_fmt.setLeftMargin(0)
+            blk_fmt.setRightMargin(0)
+            blk_fmt.setTopMargin(0)
+            blk_fmt.setBottomMargin(0)
+            char_fmt.setFontFamilies(["Consolas", "Segoe UI", "monospace"])
+            char_fmt.setForeground(QColor("#CDD6F4"))
+
+        edit_cur = QTextCursor(doc)
+        edit_cur.beginEditBlock()
+        try:
+            for bnum in range(start_block_num, end_block_num + 1):
+                blk = doc.findBlockByNumber(bnum)
+                if not blk.isValid():
+                    continue
+                bcur = QTextCursor(blk)
+                bcur.setBlockFormat(blk_fmt)
+                bcur.movePosition(
+                    QTextCursor.MoveOperation.EndOfBlock,
+                    QTextCursor.MoveMode.KeepAnchor,
+                )
+                bcur.mergeCharFormat(char_fmt)
+        finally:
+            edit_cur.endEditBlock()
+        self.mergeCurrentCharFormat(char_fmt)
+        return enabling
 
     def insert_image(self, image: QImage) -> str:
         """Scale image if wider than 280px, register resource, and insert inline."""
@@ -2189,19 +2334,28 @@ class NoteHistoryDialog(QDialog):
         self.setStyleSheet(
             """
             QDialog {
-                background-color: #1E1E2E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:0.4, y2:1,
+                    stop:0 #1E1E2E, stop:0.6 #282039, stop:1 #34233E
+                );
                 color: #CDD6F4;
                 font-family: 'Segoe UI', sans-serif;
             }
             QListWidget, QTextEdit {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342945
+                );
                 border: 1px solid #363A4F;
                 border-radius: 6px;
                 color: #CDD6F4;
                 padding: 4px;
             }
             QPushButton {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342945
+                );
                 border: 1px solid #363A4F;
                 border-radius: 5px;
                 color: #CDD6F4;
@@ -2210,8 +2364,11 @@ class NoteHistoryDialog(QDialog):
                 font-weight: 600;
             }
             QPushButton:hover {
-                background-color: #89B4FA;
-                border-color: #89B4FA;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #F9E2AF, stop:0.5 #FAB387, stop:1 #F5C2E7
+                );
+                border-color: #CBA6F7;
                 color: #1E1E2E;
             }
             """
@@ -2364,6 +2521,7 @@ class PanelHub(QWidget):
         self.db = db_manager
         self.parent_sidebar = parent_sidebar
         self.current_query = ""
+        self.grid_columns = self.GRID_COLUMNS
         self.auto_sort_usage = False
         self.active_tab_id: Optional[int] = None
         self._active_profile: str = getattr(self.db, "profile", "work")
@@ -2392,33 +2550,42 @@ class PanelHub(QWidget):
         self.setStyleSheet(
             """
             QWidget#PanelHub {
-                background-color: #1E1E2E;
+                background-color: transparent;
                 color: #CDD6F4;
             }
             QSplitter::handle {
-                background-color: #363A4F;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #363A4F, stop:0.5 #584B70, stop:1 #363A4F
+                );
                 height: 3px;
                 width: 3px;
                 border-radius: 1px;
                 margin: 2px 2px;
             }
             QSplitter::handle:hover {
-                background-color: #89B4FA;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #F9E2AF, stop:0.5 #FAB387, stop:1 #F38BA8
+                );
             }
             QLabel#SectionTitle {
-                color: #A6ADC8;
+                color: #FAB387;
                 font-size: 11px;
                 font-weight: 700;
                 letter-spacing: 0.4px;
                 text-transform: uppercase;
             }
             QLabel#EmptyHint {
-                color: #6C7086;
+                color: #A6ADC8;
                 font-size: 12px;
                 padding: 8px;
             }
             QPushButton#AddShortcutBtn {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #352946
+                );
                 border: 1px solid #363A4F;
                 border-radius: 5px;
                 color: #CDD6F4;
@@ -2427,15 +2594,18 @@ class PanelHub(QWidget):
                 padding: 0px;
             }
             QPushButton#AddShortcutBtn:hover {
-                background-color: #89B4FA;
-                border-color: #89B4FA;
+                background-color: #FAB387;
+                border-color: #F9E2AF;
                 color: #1E1E2E;
             }
             QPushButton#AddShortcutBtn:focus {
-                border: 1px solid #89B4FA;
+                border: 1px solid #FAB387;
             }
             QScrollArea#GridScroll {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:0.6 #2F2942, stop:1 #352946
+                );
                 border: 1px solid #363A4F;
                 border-radius: 6px;
             }
@@ -2443,37 +2613,46 @@ class PanelHub(QWidget):
                 background-color: transparent;
             }
             QToolButton#ShortcutTile {
-                background-color: #1E1E2E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1E1E2E, stop:1 #2A2238
+                );
                 border: 1px solid #363A4F;
                 border-radius: 6px;
                 padding: 4px;
             }
             QToolButton#ShortcutTile:hover {
                 background-color: #363A4F;
-                border-color: #89B4FA;
+                border-color: #FAB387;
             }
             QToolButton#ShortcutTile:focus {
-                border: 1px solid #89B4FA;
+                border: 1px solid #FAB387;
             }
             QToolButton#ShortcutTile:pressed {
-                background-color: #45475A;
+                background-color: #45375A;
             }
             QTextEdit#NoteEditor {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:0.6 #2F2942, stop:1 #352946
+                );
                 border: 1px solid #363A4F;
                 border-radius: 6px;
                 color: #CDD6F4;
                 padding: 8px;
                 font-family: 'Consolas', 'Segoe UI', monospace;
                 font-size: 12px;
-                selection-background-color: #89B4FA;
+                selection-background-color: #FAB387;
                 selection-color: #1E1E2E;
             }
             QTextEdit#NoteEditor:focus {
-                border-color: #89B4FA;
+                border-color: #FAB387;
             }
             QPushButton#FmtBtn, QPushButton#ActionPillBtn, QPushButton#AutoSortBtn {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342945
+                );
                 border: 1px solid #363A4F;
                 border-radius: 5px;
                 color: #CDD6F4;
@@ -2487,26 +2666,32 @@ class PanelHub(QWidget):
             }
             QPushButton#FmtBtn:hover, QPushButton#ActionPillBtn:hover, QPushButton#AutoSortBtn:hover {
                 background-color: #363A4F;
-                border-color: #89B4FA;
+                border-color: #FAB387;
             }
             QPushButton#FmtBtn:focus, QPushButton#ActionPillBtn:focus, QPushButton#AutoSortBtn:focus {
-                border: 1px solid #89B4FA;
+                border: 1px solid #FAB387;
             }
             QPushButton#FmtBtn:checked, QPushButton#AutoSortBtn:checked {
-                background-color: #89B4FA;
-                border-color: #89B4FA;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #F9E2AF, stop:0.5 #FAB387, stop:1 #F38BA8
+                );
+                border-color: #CBA6F7;
                 color: #1E1E2E;
             }
             QPushButton#FmtBtn:checked:focus, QPushButton#AutoSortBtn:checked:focus {
-                border: 2px solid #CDD6F4;
+                border: 2px solid #F9E2AF;
             }
             QLabel#NoteTabLabel {
-                color: #A6ADC8;
+                color: #F9E2AF;
                 font-size: 11px;
                 font-weight: 600;
             }
             QPushButton#CopyAllBtn {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342945
+                );
                 border: 1px solid #363A4F;
                 border-radius: 5px;
                 color: #CDD6F4;
@@ -2515,12 +2700,12 @@ class PanelHub(QWidget):
                 font-weight: 600;
             }
             QPushButton#CopyAllBtn:hover {
-                background-color: #89B4FA;
-                border-color: #89B4FA;
+                background-color: #FAB387;
+                border-color: #F9E2AF;
                 color: #1E1E2E;
             }
             QPushButton#CopyAllBtn:focus {
-                border: 1px solid #89B4FA;
+                border: 1px solid #FAB387;
             }
             QSlider#OpacitySlider::groove:horizontal {
                 background-color: #2A2D3E;
@@ -2529,28 +2714,34 @@ class PanelHub(QWidget):
                 border-radius: 3px;
             }
             QSlider#OpacitySlider::sub-page:horizontal {
-                background-color: #89B4FA;
-                border: 1px solid #89B4FA;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #F9E2AF, stop:0.45 #FAB387, stop:0.75 #F38BA8, stop:1 #CBA6F7
+                );
+                border: 1px solid #FAB387;
                 height: 6px;
                 border-radius: 3px;
             }
             QSlider#OpacitySlider::handle:horizontal {
-                background-color: #CDD6F4;
-                border: 1px solid #89B4FA;
+                background-color: #F9E2AF;
+                border: 1px solid #FAB387;
                 width: 12px;
                 height: 12px;
                 margin: -4px 0;
                 border-radius: 6px;
             }
             QSlider#OpacitySlider::handle:horizontal:hover {
-                background-color: #89B4FA;
-                border-color: #CDD6F4;
+                background-color: #FAB387;
+                border-color: #F9E2AF;
             }
             QSlider#OpacitySlider::handle:horizontal:focus {
-                border: 2px solid #CDD6F4;
+                border: 2px solid #F9E2AF;
             }
             QWidget#NoteRail {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:0.6 #2F2942, stop:1 #352946
+                );
                 border: 1px solid #363A4F;
                 border-radius: 6px;
             }
@@ -2564,14 +2755,17 @@ class PanelHub(QWidget):
                 background-color: #363A4F;
             }
             QToolButton#NoteTabBtn:focus {
-                border: 1px solid #89B4FA;
+                border: 1px solid #FAB387;
             }
             QToolButton#NoteTabBtn:checked {
-                background-color: #89B4FA;
-                border-color: #89B4FA;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #F9E2AF, stop:0.5 #FAB387, stop:1 #F38BA8
+                );
+                border-color: #CBA6F7;
             }
             QToolButton#NoteTabBtn:checked:focus {
-                border: 2px solid #CDD6F4;
+                border: 2px solid #F9E2AF;
             }
             """
         )
@@ -2739,6 +2933,9 @@ class PanelHub(QWidget):
         self.note_editor.setPlaceholderText("Write rich notes, paste images, checklists, or run commands... (auto-saved)")
         self.note_editor.textChanged.connect(self._on_note_text_changed)
         self.note_editor.currentCharFormatChanged.connect(self._sync_format_buttons)
+        from ui.sidebar_window import SunsetFadeOverlay
+
+        self.note_tab_transition = SunsetFadeOverlay(self.note_editor)
         bottom_layout.addWidget(self.note_editor, 1)
 
         note_toolbar = QHBoxLayout()
@@ -2870,6 +3067,37 @@ class PanelHub(QWidget):
         if self.splitter.orientation() != target:
             self.splitter.setOrientation(target)
         self._apply_saved_splitter_sizes()
+        self.update_grid_columns_for_width()
+
+    @classmethod
+    def compute_grid_columns(cls, avail_width: int) -> int:
+        return max(4, min(12, int((max(180, int(avail_width)) + 8) // 56)))
+
+    def update_grid_columns_for_width(self, total_width: Optional[int] = None) -> int:
+        """Recomputes shortcut grid column count (4-12) and reflows tiles if changed."""
+        if total_width is not None:
+            avail = int(total_width) - 24
+        elif (
+            self.parent_sidebar is not None
+            and self.splitter.orientation() == Qt.Orientation.Vertical
+        ):
+            avail = int(getattr(self.parent_sidebar, "sidebar_width", 380)) - 24
+        else:
+            avail = max(332, self.grid_scroll.width() - 16)
+        new_cols = self.compute_grid_columns(avail)
+        if new_cols != self.grid_columns:
+            self.grid_columns = new_cols
+            self._refresh_shortcuts_grid()
+        return self.grid_columns
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if (
+            self.isVisible()
+            and self.splitter.orientation() == Qt.Orientation.Vertical
+            and self.width() > 0
+        ):
+            self.update_grid_columns_for_width(self.width() + 24)
 
     def refresh(self, search_query: str = "") -> None:
         self.current_query = search_query or ""
@@ -2896,6 +3124,7 @@ class PanelHub(QWidget):
             if widget is not None:
                 widget.deleteLater()
 
+        cols = max(1, int(getattr(self, "grid_columns", self.GRID_COLUMNS)))
         self._shortcut_buttons.clear()
         shortcuts = self.db.get_shortcuts(
             self.current_query, sort_by_usage=self.auto_sort_usage
@@ -2909,12 +3138,12 @@ class PanelHub(QWidget):
             )
             hint.setObjectName("EmptyHint")
             hint.setWordWrap(True)
-            self.grid_layout.addWidget(hint, 0, 0, 1, self.GRID_COLUMNS)
+            self.grid_layout.addWidget(hint, 0, 0, 1, cols)
             return
 
         for idx, shortcut in enumerate(shortcuts):
-            row = idx // self.GRID_COLUMNS
-            col = idx % self.GRID_COLUMNS
+            row = idx // cols
+            col = idx % cols
             tile = self._create_shortcut_tile(shortcut)
             self._shortcut_buttons[int(shortcut["id"])] = tile
             self.grid_layout.addWidget(tile, row, col)
@@ -3045,7 +3274,9 @@ class PanelHub(QWidget):
     def _set_grid_drop_highlight(self, active: bool) -> None:
         if active:
             self.grid_scroll.setStyleSheet(
-                "QScrollArea#GridScroll { background-color: #2A2D3E; "
+                "QScrollArea#GridScroll { "
+                "background-color: qlineargradient("
+                "x1:0, y1:0, x2:1, y2:1, stop:0 #2D263E, stop:1 #3E2A48); "
                 "border: 2px dashed #89B4FA; border-radius: 6px; }"
             )
         else:
@@ -3059,7 +3290,10 @@ class PanelHub(QWidget):
         if btn is None or not _qt_is_valid(btn):
             return False
         flash_qss = (
-            "border: 2px solid #89B4FA; background-color: #363A4F; border-radius: 6px;"
+            "border: 2px solid #89B4FA; "
+            "background-color: qlineargradient("
+            "x1:0, y1:0, x2:1, y2:1, stop:0 #FAB387, stop:1 #F38BA8); "
+            "border-radius: 6px;"
         )
         btn.setStyleSheet(flash_qss)
         QTimer.singleShot(
@@ -3250,6 +3484,8 @@ class PanelHub(QWidget):
         if self.active_tab_id not in tab_ids:
             self.active_tab_id = tab_ids[0]
 
+        matching_tids = set(self.get_matching_note_tab_ids(self.current_query))
+
         active_tab = None
         for idx, tab in enumerate(tabs):
             tid = int(tab["id"])
@@ -3274,8 +3510,22 @@ class PanelHub(QWidget):
             btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             shortcut_hint = f" (Ctrl+{idx + 1})" if idx < 9 else ""
-            btn.setToolTip(f"{tab_name}{shortcut_hint}")
-            btn.setIcon(_safe_qta_icon(icon_name, "#1E1E2E" if is_active else "#A6ADC8"))
+            match_hint = " — Search Match" if tid in matching_tids else ""
+            btn.setToolTip(f"{tab_name}{shortcut_hint}{match_hint}")
+            if is_active:
+                icon_color = "#1E1E2E"
+            elif tid in matching_tids:
+                icon_color = "#FAB387"
+            else:
+                icon_color = "#A6ADC8"
+            btn.setIcon(_safe_qta_icon(icon_name, icon_color))
+            if tid in matching_tids and not is_active:
+                btn.setStyleSheet(
+                    "QToolButton#NoteTabBtn { "
+                    "border: 1px solid #FAB387; "
+                    "background-color: rgba(250, 179, 135, 0.20); "
+                    "border-radius: 5px; }"
+                )
 
             self.tab_button_group.addButton(btn, tid)
             self.rail_layout.addWidget(btn)
@@ -3287,6 +3537,86 @@ class PanelHub(QWidget):
                 str(active_tab.get("content") or ""),
                 str(active_tab.get("rich_content") or ""),
             )
+        self._highlight_editor_search_matches(self.current_query)
+
+    def get_matching_note_tab_ids(self, query: Optional[str] = None) -> List[int]:
+        """Returns IDs of note tabs whose title or content matches query."""
+        q = (self.current_query if query is None else query).strip()
+        if not q or q.startswith("="):
+            return []
+        q_low = q.lower()
+        tabs = self.db.get_note_tabs()
+        matched: List[int] = []
+        active_plain = self.note_editor.toPlainText() if hasattr(self, "note_editor") else ""
+        for tab in tabs:
+            tid = int(tab["id"])
+            title = str(tab.get("tab_name") or "").lower()
+            body = (
+                active_plain
+                if (self.active_tab_id is not None and tid == int(self.active_tab_id))
+                else str(tab.get("content") or "")
+            ).lower()
+            if q_low in body or q_low in title:
+                matched.append(tid)
+        return matched
+
+    def _highlight_editor_search_matches(self, query: str) -> int:
+        """Highlights all case-insensitive occurrences of query inside note_editor."""
+        q = (query or "").strip()
+        if not q or q.startswith("="):
+            self.note_editor.setExtraSelections([])
+            return 0
+        doc = self.note_editor.document()
+        selections: List[QTextEdit.ExtraSelection] = []
+        hl_fmt = QTextCharFormat()
+        hl_fmt.setBackground(QColor("#FAB387"))
+        hl_fmt.setForeground(QColor("#1E1E2E"))
+        cursor = QTextCursor(doc)
+        cursor.setPosition(0)
+        while True:
+            found = doc.find(q, cursor)
+            if found.isNull():
+                break
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = found
+            sel.format = hl_fmt
+            selections.append(sel)
+            if found.selectionEnd() <= cursor.position():
+                break
+            cursor = found
+        self.note_editor.setExtraSelections(selections)
+        return len(selections)
+
+    def cycle_note_search_match(self, query: Optional[str] = None) -> bool:
+        """Jumps to the next matching search occurrence across all 9 Note Tabs."""
+        q = (self.current_query if query is None else query).strip()
+        if not q or q.startswith("="):
+            return False
+        matching_tids = self.get_matching_note_tab_ids(q)
+        if not matching_tids:
+            return False
+
+        if self.active_tab_id in matching_tids:
+            doc = self.note_editor.document()
+            found_cursor = doc.find(q, self.note_editor.textCursor())
+            if not found_cursor.isNull():
+                self.note_editor.setTextCursor(found_cursor)
+                return True
+            if len(matching_tids) == 1:
+                wrap_cursor = doc.find(q, 0)
+                if not wrap_cursor.isNull():
+                    self.note_editor.setTextCursor(wrap_cursor)
+                return True
+            next_idx = (matching_tids.index(self.active_tab_id) + 1) % len(matching_tids)
+            target_tid = matching_tids[next_idx]
+        else:
+            target_tid = matching_tids[0]
+
+        self._on_note_tab_drag_hover(target_tid)
+        found = self.note_editor.document().find(q, 0)
+        if not found.isNull():
+            self.note_editor.setTextCursor(found)
+        return True
 
     def _set_editor_text_silently(self, content: str) -> None:
         self._set_editor_content_silently(content, "")
@@ -3331,6 +3661,9 @@ class PanelHub(QWidget):
                 str(selected.get("content") or ""),
                 str(selected.get("rich_content") or ""),
             )
+        self._highlight_editor_search_matches(self.current_query)
+        if not self._restoring_state and hasattr(self, "note_tab_transition"):
+            self.note_tab_transition.trigger(140)
 
     def _on_note_tab_drag_hover(self, tab_id: int) -> None:
         btn_entry = self._tab_buttons.get(int(tab_id))
@@ -3817,9 +4150,85 @@ class PanelHub(QWidget):
         self._run_with_pin_guard(_open_dialog)
 
     def _on_copy_all(self) -> None:
-        QApplication.clipboard().setText(self.note_editor.toPlainText())
+        clipboard = QApplication.clipboard()
+        prior_clip = clipboard.text()
+        expanded = expand_note_template_variables(
+            self.note_editor.toPlainText(), clipboard_text=prior_clip
+        )
+        clipboard.setText(expanded)
         self.btn_copy_all.setText("Copied!")
         QTimer.singleShot(800, self._restore_copy_all_label)
+
+    def export_active_note(self, file_path: Optional[str] = None) -> bool:
+        """Exports the active note tab to Markdown, HTML, or plain text."""
+        self.flush_pending_save()
+        chosen = file_path
+        if chosen is None:
+            default_name = f"{(self.lbl_note_tab.text() or 'note').strip()}.md"
+
+            def _pick() -> None:
+                nonlocal chosen
+                chosen, _ = QFileDialog.getSaveFileName(
+                    self,
+                    "Export Note",
+                    default_name,
+                    "Markdown (*.md);;HTML (*.html);;Text (*.txt)",
+                )
+
+            self._run_with_pin_guard(_pick)
+
+        if not chosen:
+            return False
+        dest = Path(chosen)
+        payload = (
+            self.note_editor.toHtml()
+            if dest.suffix.lower() == ".html"
+            else self.note_editor.toPlainText()
+        )
+        dest.write_text(payload, encoding="utf-8")
+        return True
+
+    def import_into_active_note(self, file_path: Optional[str] = None) -> bool:
+        """Imports a .md, .txt, or .html file into the active note tab."""
+        chosen = file_path
+        if chosen is None:
+
+            def _pick() -> None:
+                nonlocal chosen
+                chosen, _ = QFileDialog.getOpenFileName(
+                    self,
+                    "Import File into Note",
+                    "",
+                    "Notes (*.md *.txt *.html);;All Files (*)",
+                )
+
+            self._run_with_pin_guard(_pick)
+
+        if not chosen:
+            return False
+        src = Path(chosen)
+        if not src.is_file():
+            return False
+        raw = src.read_text(encoding="utf-8", errors="replace")
+        if src.suffix.lower() == ".html" and "<" in raw:
+            _register_data_uri_images(self.note_editor.document(), raw)
+            if not self.note_editor.toPlainText().strip():
+                self.note_editor.setHtml(raw)
+            else:
+                cur = self.note_editor.textCursor()
+                cur.movePosition(QTextCursor.MoveOperation.End)
+                cur.insertHtml(raw)
+                self.note_editor.setTextCursor(cur)
+        else:
+            existing = self.note_editor.toPlainText()
+            cur = self.note_editor.textCursor()
+            cur.movePosition(QTextCursor.MoveOperation.End)
+            prefix = "\n" if (existing.strip() and not existing.endswith("\n")) else ""
+            cur.insertText(prefix + raw)
+            self.note_editor.setTextCursor(cur)
+        self.save_timer.stop()
+        self._save_active_note()
+        return True
 
     def _restore_copy_all_label(self) -> None:
         if _qt_is_valid(self) and _qt_is_valid(self.btn_copy_all):
@@ -3867,6 +4276,8 @@ class PanelHub(QWidget):
             ("Ctrl+B", self.toggle_bold),
             ("Ctrl+I", self.toggle_italic),
             ("Ctrl+U", self.toggle_underline),
+            ("Ctrl+Shift+T", self.note_editor.insert_timestamp),
+            ("Ctrl+Shift+K", self.note_editor.toggle_code_block),
             ("Ctrl+Return", self.run_inline_script),
             ("Ctrl+Enter", self.run_inline_script),
         ):

@@ -3,6 +3,7 @@ import os
 import shutil
 import sqlite3
 import sys
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -37,6 +38,8 @@ DEFAULT_NOTE_TABS = [
 DEFAULT_GLOBAL_SETTINGS: Dict[str, Any] = {
     "active_profile": "work",
     "dock_edge": "right",
+    "sidebar_width": 380,
+    "sidebar_height": 360,
     "sidebar_opacity": 100,
     "is_pinned": False,
     "pinned_screen_name": "",
@@ -424,6 +427,76 @@ class DatabaseManager:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM note_tabs ORDER BY id ASC").fetchall()
             return [dict(r) for r in rows]
+
+    def update_note_tab_meta(
+        self, tab_id: int, tab_name: str, icon_name: str
+    ) -> bool:
+        """Updates display title and qtawesome icon name for an existing note tab."""
+        clean_name = str(tab_name or "").strip()
+        clean_icon = str(icon_name or "").strip()
+        if not clean_name or not clean_icon:
+            return False
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE note_tabs SET tab_name = ?, icon_name = ? WHERE id = ?",
+                (clean_name, clean_icon, int(tab_id)),
+            )
+            return cur.rowcount > 0
+
+    def reset_note_tabs_meta(self) -> None:
+        """Restores default names and icons for canonical note tabs while keeping content."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id FROM note_tabs ORDER BY id ASC").fetchall()
+            for idx, row in enumerate(rows[: len(DEFAULT_NOTE_TABS)]):
+                def_name, def_icon, _ = DEFAULT_NOTE_TABS[idx]
+                conn.execute(
+                    "UPDATE note_tabs SET tab_name = ?, icon_name = ? WHERE id = ?",
+                    (def_name, def_icon, int(row["id"])),
+                )
+
+    def export_workspace_backup(self, zip_path: Path | str) -> Path:
+        """Packages work.db, personal.db, settings.json, and cached icons into a .zip."""
+        target = Path(zip_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for fname in ("work.db", "personal.db", "settings.json"):
+                src = self.base_dir / fname
+                if src.is_file():
+                    zf.write(src, arcname=fname)
+            if self.icons_dir.is_dir():
+                for icon_file in sorted(self.icons_dir.iterdir()):
+                    if icon_file.is_file():
+                        zf.write(icon_file, arcname=f"icons/{icon_file.name}")
+        return target
+
+    def import_workspace_backup(self, zip_path: Path | str) -> bool:
+        """Safely restores workspace databases, settings.json, and icons from a backup .zip."""
+        src = Path(zip_path)
+        if not src.is_file():
+            return False
+        try:
+            with zipfile.ZipFile(src, "r") as zf:
+                names = set(zf.namelist())
+                if not (names & {"work.db", "personal.db", "settings.json"}):
+                    return False
+                self.base_dir.mkdir(parents=True, exist_ok=True)
+                self.icons_dir.mkdir(parents=True, exist_ok=True)
+                for member in zf.namelist():
+                    norm_member = member.replace("\\", "/")
+                    if norm_member.startswith("/") or ".." in norm_member.split("/"):
+                        continue
+                    if norm_member in ("work.db", "personal.db", "settings.json"):
+                        dest = self.base_dir / norm_member
+                        dest.write_bytes(zf.read(member))
+                    elif norm_member.startswith("icons/") and not norm_member.endswith("/"):
+                        rel = norm_member[len("icons/") :]
+                        if rel and Path(rel).name == rel:
+                            dest_icon = self.icons_dir / rel
+                            dest_icon.write_bytes(zf.read(member))
+        except Exception:
+            return False
+        self._init_schema()
+        return True
 
     def update_note_content(
         self, tab_id: int, content: str, rich_content: str = ""

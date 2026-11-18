@@ -542,7 +542,9 @@ class ClipListWidget(QListWidget):
     def _set_drop_highlight(self, active: bool) -> None:
         if active:
             self.setStyleSheet(
-                "QListWidget#ClipList { background-color: #1E1E2E; "
+                "QListWidget#ClipList { "
+                "background-color: qlineargradient("
+                "x1:0, y1:0, x2:1, y2:1, stop:0 #262038, stop:1 #3A2948); "
                 "border: 2px dashed #89B4FA; border-radius: 6px; padding: 4px; outline: none; }"
             )
         else:
@@ -611,7 +613,7 @@ class PanelQueue(QWidget):
         self.setStyleSheet(
             """
             QWidget#PanelQueue {
-                background-color: #1E1E2E;
+                background-color: transparent;
                 color: #CDD6F4;
             }
             QCheckBox {
@@ -620,7 +622,7 @@ class PanelQueue(QWidget):
                 spacing: 6px;
             }
             QCheckBox:focus {
-                color: #89B4FA;
+                color: #F9E2AF;
             }
             QCheckBox::indicator {
                 width: 15px;
@@ -630,19 +632,25 @@ class PanelQueue(QWidget):
                 background-color: #1E1E2E;
             }
             QCheckBox::indicator:hover, QCheckBox::indicator:focus {
-                border-color: #89B4FA;
+                border-color: #FAB387;
             }
             QCheckBox::indicator:checked {
-                background-color: #89B4FA;
-                border-color: #89B4FA;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #F9E2AF, stop:0.5 #FAB387, stop:1 #F38BA8
+                );
+                border-color: #FAB387;
             }
             QLabel#CountLabel {
-                color: #A6ADC8;
+                color: #FAB387;
                 font-size: 11px;
                 font-weight: 600;
             }
             QPushButton#ActionBtn {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342945
+                );
                 border: 1px solid #363A4F;
                 border-radius: 5px;
                 color: #CDD6F4;
@@ -652,41 +660,50 @@ class PanelQueue(QWidget):
             }
             QPushButton#ActionBtn:hover:enabled {
                 background-color: #363A4F;
-                border-color: #89B4FA;
+                border-color: #FAB387;
             }
             QPushButton#ActionBtn:focus {
-                border: 1px solid #89B4FA;
+                border: 1px solid #FAB387;
             }
             QPushButton#ActionBtn:disabled {
                 color: #6C7086;
                 border-color: #2A2D3E;
             }
             QListWidget#ClipList {
-                background-color: #1E1E2E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:0.5, y2:1,
+                    stop:0 #1E1E2E, stop:1 #272038
+                );
                 border: 1px solid #363A4F;
                 border-radius: 6px;
                 padding: 4px;
                 outline: none;
             }
             QListWidget#ClipList::item {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342946
+                );
                 border: 1px solid #363A4F;
                 border-radius: 6px;
                 color: #CDD6F4;
             }
             QListWidget#ClipList::item:selected {
-                background-color: #2A2D3E;
-                border: 1px solid #89B4FA;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #312B46, stop:1 #3D2B4E
+                );
+                border: 1px solid #FAB387;
             }
             QListWidget#ClipList::item:hover {
-                border: 1px solid #585B70;
+                border: 1px solid #CBA6F7;
             }
             QWidget#ClipRowWidget {
                 background-color: transparent;
             }
             QLineEdit#ClipInlineEdit {
                 background-color: #1E1E2E;
-                border: 1px solid #89B4FA;
+                border: 1px solid #FAB387;
                 border-radius: 4px;
                 color: #CDD6F4;
                 padding: 2px 6px;
@@ -703,7 +720,10 @@ class PanelQueue(QWidget):
                 background-color: transparent;
             }
             QPushButton#RowPinBtn, QPushButton#RowActionBtn, QPushButton#RowDeleteBtn {
-                background-color: #1E1E2E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #1E1E2E, stop:1 #292238
+                );
                 border: 1px solid #363A4F;
                 border-radius: 4px;
                 color: #CDD6F4;
@@ -720,17 +740,20 @@ class PanelQueue(QWidget):
                 color: #F9E2AF;
             }
             QPushButton#RowPinBtn:checked {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #3A2D3E, stop:1 #463245
+                );
                 border: 1px solid #F9E2AF;
                 color: #F9E2AF;
             }
             QPushButton#RowActionBtn:hover {
-                background-color: #89B4FA;
-                border-color: #89B4FA;
+                background-color: #FAB387;
+                border-color: #F9E2AF;
                 color: #1E1E2E;
             }
             QPushButton#RowPinBtn:focus, QPushButton#RowActionBtn:focus, QPushButton#RowDeleteBtn:focus {
-                border: 1px solid #89B4FA;
+                border: 1px solid #FAB387;
             }
             QPushButton#RowDeleteBtn {
                 color: #A6ADC8;
@@ -741,7 +764,10 @@ class PanelQueue(QWidget):
                 color: #1E1E2E;
             }
             QComboBox#JoinCombo {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342945
+                );
                 border: 1px solid #363A4F;
                 border-radius: 6px;
                 color: #CDD6F4;
@@ -750,7 +776,7 @@ class PanelQueue(QWidget):
                 font-weight: 600;
             }
             QComboBox#JoinCombo:hover, QComboBox#JoinCombo:focus {
-                border-color: #89B4FA;
+                border-color: #FAB387;
             }
             QComboBox#JoinCombo::drop-down {
                 border: none;
@@ -760,12 +786,15 @@ class PanelQueue(QWidget):
                 background-color: #2A2D3E;
                 border: 1px solid #363A4F;
                 color: #CDD6F4;
-                selection-background-color: #89B4FA;
+                selection-background-color: #FAB387;
                 selection-color: #1E1E2E;
             }
             QPushButton#PrimaryCopyBtn {
-                background-color: #89B4FA;
-                border: 1px solid #89B4FA;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #F9E2AF, stop:0.48 #FAB387, stop:1 #F38BA8
+                );
+                border: 1px solid #CBA6F7;
                 border-radius: 6px;
                 color: #1E1E2E;
                 padding: 7px 12px;
@@ -773,11 +802,14 @@ class PanelQueue(QWidget):
                 font-weight: 700;
             }
             QPushButton#PrimaryCopyBtn:hover:enabled {
-                background-color: #A6C8FF;
-                border-color: #A6C8FF;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #FFE9B8, stop:0.5 #FFC299, stop:1 #F7A1B8
+                );
+                border-color: #F9E2AF;
             }
             QPushButton#PrimaryCopyBtn:focus {
-                border: 2px solid #CDD6F4;
+                border: 2px solid #F9E2AF;
             }
             QPushButton#PrimaryCopyBtn:disabled {
                 background-color: #2A2D3E;
@@ -826,6 +858,9 @@ class PanelQueue(QWidget):
             on_external_drop=self.handle_external_drop,
             parent=self,
         )
+        from ui.sidebar_window import SunsetFadeOverlay
+
+        self.queue_transition = SunsetFadeOverlay(self.list_widget)
         root.addWidget(self.list_widget, 1)
 
         # --- Bottom Batch-Copy Assembler Bar ---
@@ -1081,7 +1116,8 @@ class PanelQueue(QWidget):
     def refresh(self, search_query: str = "") -> None:
         self.current_query = search_query or ""
         current_profile = getattr(self.db, "profile", "work")
-        if current_profile != self._active_profile:
+        profile_switched = current_profile != self._active_profile
+        if profile_switched:
             self._active_profile = current_profile
             self.restore_workspace_settings()
         clips = self.db.get_clips(self.current_query)
@@ -1095,6 +1131,8 @@ class PanelQueue(QWidget):
             self._updating_ui = False
 
         self._update_summary_controls()
+        if profile_switched and hasattr(self, "queue_transition"):
+            self.queue_transition.trigger(140)
 
     def _add_clip_item(self, clip: Dict) -> None:
         item = QListWidgetItem()
@@ -1246,7 +1284,10 @@ class PanelQueue(QWidget):
         menu.setStyleSheet(
             """
             QMenu {
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:0.5, y2:1,
+                    stop:0 #2A2D3E, stop:1 #362947
+                );
                 border: 1px solid #363A4F;
                 color: #CDD6F4;
                 padding: 4px;
@@ -1256,7 +1297,10 @@ class PanelQueue(QWidget):
                 border-radius: 4px;
             }
             QMenu::item:selected {
-                background-color: #89B4FA;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #F9E2AF, stop:0.5 #FAB387, stop:1 #F38BA8
+                );
                 color: #1E1E2E;
             }
             QMenu::separator {

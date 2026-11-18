@@ -1,4 +1,8 @@
-from typing import Callable
+import ast
+import operator as _op
+from pathlib import Path
+import sys
+from typing import Callable, List, Optional
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -7,15 +11,34 @@ from PySide6.QtCore import (
     QPoint,
     QPropertyAnimation,
     QRect,
+    QRectF,
     Qt,
     QTimer,
+    QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QAction, QCursor, QGuiApplication, QKeyEvent
+from PySide6.QtGui import (
+    QAction,
+    QBrush,
+    QColor,
+    QCursor,
+    QGuiApplication,
+    QKeyEvent,
+    QKeySequence,
+    QLinearGradient,
+    QMouseEvent,
+    QPainter,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLayout,
@@ -23,7 +46,9 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMenu,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -38,6 +63,158 @@ except ImportError:  # pragma: no cover - shiboken6 ships with PySide6
 
 from ui.button_fx import install_button_fx
 from ui.toast_popup import ToastPopup
+
+
+class SunsetHorizonBar(QWidget):
+    """Animated 3px shimmering sunset horizon accent bar displayed under the header."""
+
+    _STOPS = (
+        QColor("#F9E2AF"),
+        QColor("#FAB387"),
+        QColor("#F38BA8"),
+        QColor("#CBA6F7"),
+        QColor("#89B4FA"),
+        QColor("#F9E2AF"),
+    )
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("SunsetHorizonBar")
+        self.setFixedHeight(3)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._phase = 0.0
+
+        self.phase_anim = QVariantAnimation(self)
+        self.phase_anim.setStartValue(0.0)
+        self.phase_anim.setEndValue(1.0)
+        self.phase_anim.setDuration(3200)
+        self.phase_anim.setLoopCount(-1)
+        self.phase_anim.valueChanged.connect(self._on_phase_changed)
+
+    def _on_phase_changed(self, value) -> None:
+        self._phase = float(value) % 1.0
+        self.update()
+
+    def start(self) -> None:
+        if self.phase_anim.state() != QVariantAnimation.State.Running:
+            self.phase_anim.start()
+
+    def stop(self) -> None:
+        if self.phase_anim.state() != QVariantAnimation.State.Stopped:
+            self.phase_anim.stop()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.start()
+
+    def hideEvent(self, event) -> None:
+        self.stop()
+        super().hideEvent(event)
+
+    @classmethod
+    def _sample_color(cls, t: float) -> QColor:
+        u = (float(t) % 1.0) * (len(cls._STOPS) - 1)
+        idx = int(u)
+        frac = u - idx
+        c1 = cls._STOPS[idx]
+        c2 = cls._STOPS[idx + 1]
+        return QColor(
+            int(c1.red() + (c2.red() - c1.red()) * frac),
+            int(c1.green() + (c2.green() - c1.green()) * frac),
+            int(c1.blue() + (c2.blue() - c1.blue()) * frac),
+        )
+
+    def paintEvent(self, event) -> None:
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        grad = QLinearGradient(0.0, 0.0, float(self.width()), 0.0)
+        for step in (0.0, 0.2, 0.4, 0.6, 0.8, 1.0):
+            grad.setColorAt(step, self._sample_color(step - self._phase))
+
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(grad))
+            painter.drawRoundedRect(QRectF(self.rect()), 1.5, 1.5)
+        finally:
+            painter.end()
+
+
+class SunsetFadeOverlay(QWidget):
+    """Lightweight sunset-tinted veil overlay for smooth panel and tab transitions."""
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setObjectName("SunsetFadeOverlay")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.progress = 1.0
+
+        self.anim = QVariantAnimation(self)
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(1.0)
+        self.anim.setDuration(165)
+        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.anim.valueChanged.connect(self._on_anim_value)
+        self.anim.finished.connect(self._on_anim_finished)
+        parent.installEventFilter(self)
+        self.hide()
+
+    def trigger(self, duration_ms: int = 165) -> bool:
+        parent = self.parentWidget()
+        if parent is None or not parent.isVisible() or parent.width() <= 0 or parent.height() <= 0:
+            self.progress = 1.0
+            self.hide()
+            return False
+        self.anim.stop()
+        self.anim.setDuration(max(60, int(duration_ms)))
+        self.setGeometry(parent.rect())
+        self.progress = 0.0
+        self.show()
+        self.raise_()
+        self.anim.start()
+        return True
+
+    def _on_anim_value(self, value) -> None:
+        self.progress = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    def _on_anim_finished(self) -> None:
+        self.progress = 1.0
+        self.hide()
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.parentWidget() and event.type() == QEvent.Type.Resize and self.isVisible():
+            self.setGeometry(obj.rect())
+        return super().eventFilter(obj, event)
+
+    def paintEvent(self, event) -> None:
+        remaining = max(0.0, 1.0 - self.progress)
+        if remaining <= 0.01 or self.width() <= 0 or self.height() <= 0:
+            return
+        painter = QPainter(self)
+        try:
+            painter.setPen(Qt.PenStyle.NoPen)
+            veil = QColor("#241E36")
+            veil.setAlpha(int(175 * remaining))
+            painter.fillRect(self.rect(), veil)
+
+            glow_grad = QLinearGradient(0.0, 0.0, float(self.width()), 0.0)
+            c_peach = QColor("#FAB387")
+            c_pink = QColor("#F38BA8")
+            c_lav = QColor("#CBA6F7")
+            top_alpha = int(215 * remaining)
+            for c in (c_peach, c_pink, c_lav):
+                c.setAlpha(top_alpha)
+            glow_grad.setColorAt(0.0, c_peach)
+            glow_grad.setColorAt(0.5, c_pink)
+            glow_grad.setColorAt(1.0, c_lav)
+            painter.fillRect(0, 0, self.width(), 2, QBrush(glow_grad))
+        finally:
+            painter.end()
 
 
 def _is_droppable_mime(mime: QMimeData | None) -> bool:
@@ -106,6 +283,395 @@ class DroppablePanelSwitchBtn(QPushButton):
         event.acceptProposedAction()
 
 
+_MATH_BIN_OPS = {
+    ast.Add: _op.add,
+    ast.Sub: _op.sub,
+    ast.Mult: _op.mul,
+    ast.Div: _op.truediv,
+    ast.FloorDiv: _op.floordiv,
+    ast.Mod: _op.mod,
+    ast.Pow: _op.pow,
+}
+_MATH_UNARY_OPS = {
+    ast.UAdd: _op.pos,
+    ast.USub: _op.neg,
+}
+
+
+def evaluate_math_query(query: str) -> Optional[str]:
+    """Safely evaluates an inline arithmetic expression (or '= expr') and returns formatted result."""
+    raw = (query or "").strip()
+    if not raw:
+        return None
+    has_eq = raw.startswith("=")
+    expr = raw[1:].strip() if has_eq else raw
+    if not expr:
+        return None
+    if not has_eq:
+        if not any(ch in expr for ch in "+-*/%"):
+            return None
+        if not all(ch.isdigit() or ch in ".+-*/%() " for ch in expr):
+            return None
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return None
+
+    def _eval(node):
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+                raise ValueError("Invalid constant")
+            return float(node.value)
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _MATH_UNARY_OPS:
+            return _MATH_UNARY_OPS[type(node.op)](_eval(node.operand))
+        if isinstance(node, ast.BinOp) and type(node.op) in _MATH_BIN_OPS:
+            left = _eval(node.left)
+            right = _eval(node.right)
+            if isinstance(node.op, ast.Pow) and abs(right) > 1000:
+                raise ValueError("Exponent too large")
+            if isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)) and right == 0:
+                raise ZeroDivisionError()
+            return _MATH_BIN_OPS[type(node.op)](left, right)
+        raise ValueError("Unsupported AST node")
+
+    try:
+        val = _eval(tree)
+    except Exception:
+        return None
+    if not isinstance(val, (int, float)) or abs(val) == float("inf") or val != val:
+        return None
+    if abs(val - round(val)) < 1e-12:
+        return str(int(round(val)))
+    formatted = f"{val:.6f}".rstrip("0").rstrip(".")
+    return formatted if formatted != "-0" else "0"
+
+
+def _resolve_startup_callbacks():
+    for mod_name in ("__main__", "main"):
+        mod = sys.modules.get(mod_name)
+        if (
+            mod is not None
+            and hasattr(mod, "is_startup_enabled")
+            and hasattr(mod, "set_startup_enabled")
+        ):
+            return mod.is_startup_enabled, mod.set_startup_enabled
+    try:
+        import main as app_main
+
+        return app_main.is_startup_enabled, app_main.set_startup_enabled
+    except Exception:
+        return (lambda: False), (lambda _enabled: False)
+
+
+class SettingsDialog(QDialog):
+    """Sunset-themed Settings & Workspace Backup modal dialog."""
+
+    ICON_CHOICES = (
+        "fa5s.sticky-note",
+        "fa5s.terminal",
+        "fa5s.file-alt",
+        "fa5s.check-square",
+        "fa5s.clipboard-list",
+        "fa5s.network-wired",
+        "fa5s.code",
+        "fa5s.bookmark",
+        "fa5s.lightbulb",
+        "fa5s.folder",
+        "fa5s.bug",
+        "fa5s.server",
+        "fa5s.rocket",
+        "fa5s.star",
+    )
+
+    def __init__(
+        self,
+        sidebar: "SidebarWindow",
+        startup_getter: Optional[Callable[[], bool]] = None,
+        startup_setter: Optional[Callable[[bool], bool]] = None,
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent or sidebar)
+        self.sidebar = sidebar
+        default_get, default_set = _resolve_startup_callbacks()
+        self._get_startup_cb = startup_getter or default_get
+        self._set_startup_cb = startup_setter or default_set
+        self._initial_startup = bool(self._get_startup_cb())
+        self.tab_rows: List[tuple[int, QLineEdit, QComboBox]] = []
+
+        self.setWindowTitle("F9Sidebar Settings & Backup")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.setModal(True)
+        self.resize(440, 580)
+
+        self._setup_styles()
+        self._build_ui()
+
+    def _setup_styles(self) -> None:
+        self.setStyleSheet(
+            """
+            QDialog {
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:0.4, y2:1,
+                    stop:0 #1E1E2E, stop:0.6 #282039, stop:1 #35233D
+                );
+                color: #CDD6F4;
+                font-family: 'Segoe UI', sans-serif;
+            }
+            QLabel {
+                color: #CDD6F4;
+                font-size: 12px;
+            }
+            QLabel#SettingsSection {
+                color: #FAB387;
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0.5px;
+                text-transform: uppercase;
+                margin-top: 6px;
+            }
+            QLineEdit, QSpinBox, QComboBox {
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342945
+                );
+                border: 1px solid #363A4F;
+                border-radius: 5px;
+                padding: 4px 8px;
+                color: #CDD6F4;
+                font-size: 12px;
+            }
+            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+                border-color: #FAB387;
+            }
+            QCheckBox {
+                color: #CDD6F4;
+                font-size: 12px;
+                spacing: 6px;
+            }
+            QPushButton {
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342945
+                );
+                border: 1px solid #363A4F;
+                border-radius: 5px;
+                color: #CDD6F4;
+                padding: 5px 10px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #363A4F;
+                border-color: #FAB387;
+            }
+            QScrollArea {
+                background-color: rgba(30, 30, 46, 0.55);
+                border: 1px solid #363A4F;
+                border-radius: 6px;
+            }
+            """
+        )
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(8)
+
+        lbl_appear = QLabel("Window & Appearance")
+        lbl_appear.setObjectName("SettingsSection")
+        root.addWidget(lbl_appear)
+
+        form = QFormLayout()
+        form.setSpacing(6)
+
+        self.cmb_dock_edge = QComboBox()
+        for edge in ("right", "bottom", "left", "top"):
+            self.cmb_dock_edge.addItem(edge.capitalize(), edge)
+        idx_edge = self.cmb_dock_edge.findData(self.sidebar.dock_edge)
+        if idx_edge >= 0:
+            self.cmb_dock_edge.setCurrentIndex(idx_edge)
+        form.addRow("Dock Edge:", self.cmb_dock_edge)
+
+        dim_row = QHBoxLayout()
+        dim_row.setSpacing(6)
+        self.spin_width = QSpinBox()
+        self.spin_width.setRange(
+            SidebarWindow.MIN_SIDEBAR_WIDTH, SidebarWindow.MAX_SIDEBAR_WIDTH
+        )
+        self.spin_width.setSuffix(" px")
+        self.spin_width.setValue(int(self.sidebar.sidebar_width))
+        dim_row.addWidget(QLabel("W:"))
+        dim_row.addWidget(self.spin_width, 1)
+
+        self.spin_height = QSpinBox()
+        self.spin_height.setRange(
+            SidebarWindow.MIN_SIDEBAR_HEIGHT, SidebarWindow.MAX_SIDEBAR_HEIGHT
+        )
+        self.spin_height.setSuffix(" px")
+        self.spin_height.setValue(int(self.sidebar.sidebar_height))
+        dim_row.addWidget(QLabel("H:"))
+        dim_row.addWidget(self.spin_height, 1)
+        form.addRow("Size (L/R | T/B):", dim_row)
+
+        self.spin_opacity = QSpinBox()
+        self.spin_opacity.setRange(40, 100)
+        self.spin_opacity.setSuffix("%")
+        self.spin_opacity.setValue(int(self.sidebar.sidebar_opacity))
+        form.addRow("Opacity:", self.spin_opacity)
+
+        root.addLayout(form)
+
+        sys_row = QHBoxLayout()
+        sys_row.setSpacing(12)
+        self.chk_startup = QCheckBox("Launch at Windows Startup")
+        self.chk_startup.setChecked(self._initial_startup)
+        sys_row.addWidget(self.chk_startup)
+
+        self.chk_pause_hotkeys = QCheckBox("Pause Global Hotkeys")
+        self.chk_pause_hotkeys.setChecked(
+            bool(getattr(self.sidebar.hooks, "hotkeys_paused", False))
+        )
+        sys_row.addWidget(self.chk_pause_hotkeys)
+        root.addLayout(sys_row)
+
+        tabs_hdr = QHBoxLayout()
+        lbl_tabs = QLabel("9 Canonical Note Tabs")
+        lbl_tabs.setObjectName("SettingsSection")
+        tabs_hdr.addWidget(lbl_tabs)
+        tabs_hdr.addStretch(1)
+        self.btn_reset_tabs = QPushButton("Reset 9 Tab Names & Icons")
+        self.btn_reset_tabs.clicked.connect(self.reset_tab_inputs_to_defaults)
+        tabs_hdr.addWidget(self.btn_reset_tabs)
+        root.addLayout(tabs_hdr)
+
+        tabs_scroll = QScrollArea()
+        tabs_scroll.setWidgetResizable(True)
+        tabs_container = QWidget()
+        tabs_layout = QVBoxLayout(tabs_container)
+        tabs_layout.setContentsMargins(6, 6, 6, 6)
+        tabs_layout.setSpacing(5)
+
+        for idx, tab in enumerate(self.sidebar.db.get_note_tabs()):
+            row_lay = QHBoxLayout()
+            row_lay.setSpacing(6)
+            lbl = QLabel(f"Ctrl+{idx + 1}")
+            lbl.setFixedWidth(42)
+            row_lay.addWidget(lbl)
+
+            name_edit = QLineEdit(str(tab.get("tab_name", "")))
+            row_lay.addWidget(name_edit, 1)
+
+            icon_cmb = QComboBox()
+            icon_cmb.setEditable(True)
+            for ico in self.ICON_CHOICES:
+                icon_cmb.addItem(ico)
+            icon_val = str(tab.get("icon_name", "fa5s.sticky-note"))
+            icon_cmb.setCurrentText(icon_val)
+            icon_cmb.setFixedWidth(145)
+            row_lay.addWidget(icon_cmb)
+
+            tabs_layout.addLayout(row_lay)
+            self.tab_rows.append((int(tab["id"]), name_edit, icon_cmb))
+
+        tabs_scroll.setWidget(tabs_container)
+        root.addWidget(tabs_scroll, 1)
+
+        lbl_bak = QLabel("Workspace Backup (.zip)")
+        lbl_bak.setObjectName("SettingsSection")
+        root.addWidget(lbl_bak)
+
+        bak_row = QHBoxLayout()
+        bak_row.setSpacing(8)
+        self.btn_export_backup = QPushButton("Export Backup (.zip)...")
+        self.btn_export_backup.clicked.connect(lambda: self.export_backup())
+        bak_row.addWidget(self.btn_export_backup)
+
+        self.btn_import_backup = QPushButton("Import Backup (.zip)...")
+        self.btn_import_backup.clicked.connect(lambda: self.import_backup())
+        bak_row.addWidget(self.btn_import_backup)
+        root.addLayout(bak_row)
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.button_box.accepted.connect(self._on_accept)
+        self.button_box.rejected.connect(self.reject)
+        root.addWidget(self.button_box)
+
+    def reset_tab_inputs_to_defaults(self) -> None:
+        from database import DEFAULT_NOTE_TABS
+
+        for idx, (_tid, name_edit, icon_cmb) in enumerate(self.tab_rows):
+            if idx < len(DEFAULT_NOTE_TABS):
+                def_name, def_icon, _ = DEFAULT_NOTE_TABS[idx]
+                name_edit.setText(def_name)
+                icon_cmb.setCurrentText(def_icon)
+
+    def export_backup(self, file_path: Optional[str] = None) -> Optional[Path]:
+        self.sidebar.flush_pending_state()
+        chosen = file_path
+        if chosen is None:
+            chosen, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export Workspace Backup",
+                "F9Sidebar_backup.zip",
+                "Zip Archive (*.zip)",
+            )
+        if not chosen:
+            return None
+        return self.sidebar.db.export_workspace_backup(chosen)
+
+    def import_backup(self, file_path: Optional[str] = None) -> bool:
+        chosen = file_path
+        if chosen is None:
+            chosen, _ = QFileDialog.getOpenFileName(
+                self,
+                "Import Workspace Backup",
+                "",
+                "Zip Archive (*.zip)",
+            )
+        if not chosen:
+            return False
+        if hasattr(self.sidebar.panel_hub, "save_timer"):
+            self.sidebar.panel_hub.save_timer.stop()
+        ok = self.sidebar.db.import_workspace_backup(chosen)
+        if ok:
+            tabs = self.sidebar.db.get_note_tabs()
+            for idx, (_tid, name_edit, icon_cmb) in enumerate(self.tab_rows):
+                if idx < len(tabs):
+                    name_edit.setText(str(tabs[idx].get("tab_name", "")))
+                    icon_cmb.setCurrentText(str(tabs[idx].get("icon_name", "")))
+            self.sidebar.refresh_views()
+        return ok
+
+    def apply_settings(self) -> None:
+        for tid, name_edit, icon_cmb in self.tab_rows:
+            self.sidebar.db.update_note_tab_meta(
+                tid, name_edit.text(), icon_cmb.currentText()
+            )
+        edge = self.cmb_dock_edge.currentData()
+        if edge:
+            self.sidebar.set_dock_edge(str(edge))
+        self.sidebar.set_sidebar_dimensions(
+            self.spin_width.value(),
+            self.spin_height.value(),
+            persist=True,
+            update_appbar=True,
+        )
+        self.sidebar.set_sidebar_opacity(self.spin_opacity.value())
+        if hasattr(self.sidebar.hooks, "hotkeys_paused"):
+            self.sidebar.hooks.hotkeys_paused = self.chk_pause_hotkeys.isChecked()
+        if self._set_startup_cb is not None and self.chk_startup.isChecked() != self._initial_startup:
+            self._set_startup_cb(self.chk_startup.isChecked())
+        self.sidebar.refresh_views()
+
+    def _on_accept(self) -> None:
+        self.apply_settings()
+        self.accept()
+
+
 class SidebarWindow(QWidget):
     sig_request_restore_focus = Signal()
     sig_profile_changed = Signal(str)
@@ -126,18 +692,27 @@ class SidebarWindow(QWidget):
         "top": "border-bottom: 1px solid #363A4F;",
         "bottom": "border-top: 1px solid #363A4F;",
     }
+    MIN_SIDEBAR_WIDTH = 320
+    MAX_SIDEBAR_WIDTH = 720
+    DEFAULT_SIDEBAR_WIDTH = 380
+    MIN_SIDEBAR_HEIGHT = 260
+    MAX_SIDEBAR_HEIGHT = 680
+    DEFAULT_SIDEBAR_HEIGHT = 360
+    RESIZE_GRIP_MARGIN = 7
 
     def __init__(self, db_manager, hook_manager):
         super().__init__()
         self.db = db_manager
         self.hooks = hook_manager
-        self.sidebar_width = 380
-        self.sidebar_height = 360
+        self.sidebar_width = self.DEFAULT_SIDEBAR_WIDTH
+        self.sidebar_height = self.DEFAULT_SIDEBAR_HEIGHT
         self.dock_edge = "right"
         self.appbar_enabled = False
         self.is_pinned = False
         self._is_closing = False
         self._restoring_state = False
+        self._resizing_edge = False
+        self._current_calc_result: Optional[str] = None
         self._drag_hover_active = False
         self._drag_peek_opened = False
         self._last_appbar_rect: QRect | None = None
@@ -165,6 +740,7 @@ class SidebarWindow(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAcceptDrops(True)
+        self.setMouseTracking(True)
 
         self._setup_styles()
         self._build_ui()
@@ -172,6 +748,10 @@ class SidebarWindow(QWidget):
         self._restore_persisted_state()
         self.refresh_views()
         self._edge_drag_timer.start()
+
+        self.settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
+        self.settings_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self.settings_shortcut.activated.connect(self.open_settings_dialog)
 
         app = QApplication.instance()
         if app is not None:
@@ -185,24 +765,42 @@ class SidebarWindow(QWidget):
         self.setStyleSheet(
             f"""
             QWidget#SidebarRoot {{
-                background-color: #1E1E2E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:0.35, y2:1,
+                    stop:0 #1E1E2E,
+                    stop:0.5 #241E36,
+                    stop:0.85 #2D213C,
+                    stop:1 #35233D
+                );
                 {edge_border}
                 color: #CDD6F4;
                 font-family: 'Segoe UI', sans-serif;
             }}
             QLineEdit#OmniSearch {{
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #332944
+                );
                 border: 1px solid #363A4F;
                 border-radius: 6px;
                 padding: 6px 10px;
                 color: #CDD6F4;
                 font-size: 13px;
+                selection-background-color: #FAB387;
+                selection-color: #1E1E2E;
             }}
             QLineEdit#OmniSearch:focus {{
-                border: 1px solid #89B4FA;
+                border: 1px solid #FAB387;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2E2B42, stop:1 #392B4A
+                );
             }}
             QPushButton#HeaderBtn, QPushButton#PillBtn {{
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #2A2D3E, stop:1 #342944
+                );
                 border: 1px solid #363A4F;
                 border-radius: 6px;
                 color: #CDD6F4;
@@ -214,22 +812,76 @@ class SidebarWindow(QWidget):
                 background-color: #363A4F;
             }}
             QPushButton#HeaderBtn:focus, QPushButton#PillBtn:focus {{
-                border: 1px solid #89B4FA;
+                border: 1px solid #FAB387;
             }}
             QPushButton#HeaderBtn:checked, QPushButton#PillBtn:checked {{
-                background-color: #89B4FA;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #F9E2AF, stop:0.48 #FAB387, stop:1 #F38BA8
+                );
                 color: #1E1E2E;
-                border-color: #89B4FA;
+                border-color: #CBA6F7;
             }}
             QPushButton#HeaderBtn:checked:focus, QPushButton#PillBtn:checked:focus {{
-                border: 2px solid #CDD6F4;
+                border: 2px solid #F9E2AF;
+            }}
+            QPushButton#CalcBadge {{
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #F9E2AF, stop:0.5 #FAB387, stop:1 #F38BA8
+                );
+                border: 1px solid #CBA6F7;
+                border-radius: 6px;
+                color: #1E1E2E;
+                padding: 4px 8px;
+                font-size: 12px;
+                font-weight: 700;
             }}
             QListWidget {{
-                background-color: #2A2D3E;
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:0.5, y2:1,
+                    stop:0 #2A2D3E, stop:1 #322944
+                );
                 border: 1px solid #363A4F;
                 border-radius: 6px;
                 color: #CDD6F4;
                 padding: 4px;
+            }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 7px;
+                margin: 2px 1px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: qlineargradient(
+                    x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #FAB387, stop:0.5 #F38BA8, stop:1 #CBA6F7
+                );
+                border-radius: 3px;
+                min-height: 24px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: transparent;
+                height: 0px;
+            }}
+            QScrollBar:horizontal {{
+                background: transparent;
+                height: 7px;
+                margin: 1px 2px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #F9E2AF, stop:0.5 #FAB387, stop:1 #F38BA8
+                );
+                border-radius: 3px;
+                min-width: 24px;
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background: transparent;
+                width: 0px;
             }}
             """
         )
@@ -241,15 +893,24 @@ class SidebarWindow(QWidget):
         root_layout.setContentsMargins(12, 12, 12, 12)
         root_layout.setSpacing(10)
 
-        # --- Row 1: Omni-Bar Search + Profile + Dock Edge + AppBar + Pin ---
+        # --- Row 1: Omni-Bar Search + Calc + Profile + Edge + AppBar + Pin + Settings ---
         top_row = QHBoxLayout()
-        top_row.setSpacing(6)
+        top_row.setSpacing(4)
 
         self.search_input = QLineEdit()
         self.search_input.setObjectName("OmniSearch")
-        self.search_input.setPlaceholderText("Search shortcuts, notes & clips... (F9)")
+        self.search_input.setPlaceholderText("Search, calc (=2+2), or launch... (F9)")
         self.search_input.textChanged.connect(self.refresh_views)
+        self.search_input.returnPressed.connect(self._on_omni_enter_pressed)
         top_row.addWidget(self.search_input, 1)
+
+        self.calc_badge = QPushButton("")
+        self.calc_badge.setObjectName("CalcBadge")
+        self.calc_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.calc_badge.setToolTip("Click or press Enter to copy calculated result")
+        self.calc_badge.clicked.connect(self._copy_calc_result)
+        self.calc_badge.hide()
+        top_row.addWidget(self.calc_badge)
 
         self.btn_profile = QPushButton("WORK")
         self.btn_profile.setObjectName("PillBtn")
@@ -284,6 +945,13 @@ class SidebarWindow(QWidget):
         self.btn_pin.setToolTip("Pin sidebar open & dock edge (Ctrl+Shift+F9)")
         self.btn_pin.toggled.connect(self._on_pin_toggled)
         top_row.addWidget(self.btn_pin)
+
+        self.btn_settings = QPushButton()
+        self.btn_settings.setObjectName("HeaderBtn")
+        self.btn_settings.setIcon(qta.icon("fa5s.cog", color="#CDD6F4"))
+        self.btn_settings.setToolTip("Settings & Workspace Backup (Ctrl+,)")
+        self.btn_settings.clicked.connect(self.open_settings_dialog)
+        top_row.addWidget(self.btn_settings)
 
         root_layout.addLayout(top_row)
 
@@ -320,9 +988,13 @@ class SidebarWindow(QWidget):
         nav_row.addWidget(self.btn_panel_queue, 1)
         root_layout.addLayout(nav_row)
 
+        self.horizon_bar = SunsetHorizonBar(self)
+        root_layout.addWidget(self.horizon_bar)
+
         # --- Main Body: QStackedWidget for Panel 1 & Panel 2 ---
         self.stack = QStackedWidget()
         self._load_panels()
+        self.panel_transition = SunsetFadeOverlay(self.stack)
         root_layout.addWidget(self.stack, 1)
 
     def _load_panels(self) -> None:
@@ -501,6 +1173,20 @@ class SidebarWindow(QWidget):
             if saved_edge in self.DOCK_EDGES:
                 self.set_dock_edge(saved_edge)
 
+            saved_w = self.db.get_global_setting("sidebar_width", self.DEFAULT_SIDEBAR_WIDTH)
+            saved_h = self.db.get_global_setting("sidebar_height", self.DEFAULT_SIDEBAR_HEIGHT)
+            try:
+                self.set_sidebar_dimensions(
+                    int(saved_w), int(saved_h), persist=False, update_appbar=False
+                )
+            except (TypeError, ValueError):
+                self.set_sidebar_dimensions(
+                    self.DEFAULT_SIDEBAR_WIDTH,
+                    self.DEFAULT_SIDEBAR_HEIGHT,
+                    persist=False,
+                    update_appbar=False,
+                )
+
             saved_opacity = self.db.get_global_setting("sidebar_opacity", 100)
             try:
                 self.set_sidebar_opacity(int(saved_opacity))
@@ -532,6 +1218,126 @@ class SidebarWindow(QWidget):
     @staticmethod
     def _exec_menu(menu: QMenu, global_pos):
         return menu.exec(global_pos)
+
+    @staticmethod
+    def _exec_dialog(dlg: QDialog) -> int:
+        return dlg.exec()
+
+    def set_sidebar_dimensions(
+        self,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        persist: bool = True,
+        update_appbar: bool = True,
+    ) -> tuple[int, int]:
+        """Updates clamped sidebar width/height, reflows grid columns, and optionally syncs AppBar."""
+        if width is not None:
+            self.sidebar_width = max(
+                self.MIN_SIDEBAR_WIDTH, min(self.MAX_SIDEBAR_WIDTH, int(width))
+            )
+        if height is not None:
+            self.sidebar_height = max(
+                self.MIN_SIDEBAR_HEIGHT, min(self.MAX_SIDEBAR_HEIGHT, int(height))
+            )
+        if hasattr(self, "panel_hub") and hasattr(
+            self.panel_hub, "update_grid_columns_for_width"
+        ):
+            self.panel_hub.update_grid_columns_for_width(self.sidebar_width)
+        if self.isVisible() and not self._is_closing:
+            screen = (
+                self.screen()
+                or QGuiApplication.screenAt(self.frameGeometry().center())
+                or QGuiApplication.primaryScreen()
+            )
+            if update_appbar:
+                _, end_rect = self._resolve_target_rects(screen)
+            else:
+                avail = self._get_clean_available_geometry(screen)
+                _, end_rect = self._compute_edge_rects(avail)
+            self.anim.stop()
+            self.setGeometry(end_rect)
+        if (
+            persist
+            and not self._restoring_state
+            and hasattr(self.db, "update_global_settings")
+        ):
+            self.db.update_global_settings(
+                {
+                    "sidebar_width": int(self.sidebar_width),
+                    "sidebar_height": int(self.sidebar_height),
+                }
+            )
+        return (self.sidebar_width, self.sidebar_height)
+
+    def reset_sidebar_dimensions(self) -> tuple[int, int]:
+        """Resets sidebar width and height back to 380x360 defaults."""
+        return self.set_sidebar_dimensions(
+            self.DEFAULT_SIDEBAR_WIDTH,
+            self.DEFAULT_SIDEBAR_HEIGHT,
+            persist=True,
+            update_appbar=True,
+        )
+
+    def _is_on_resize_border(self, local_pos: QPoint) -> bool:
+        m = self.RESIZE_GRIP_MARGIN
+        if self.dock_edge == "left":
+            return (self.width() - m) <= local_pos.x() <= self.width()
+        if self.dock_edge == "top":
+            return (self.height() - m) <= local_pos.y() <= self.height()
+        if self.dock_edge == "bottom":
+            return 0 <= local_pos.y() <= m
+        return 0 <= local_pos.x() <= m
+
+    def open_settings_dialog(self) -> Optional[SettingsDialog]:
+        """Opens the Sunset-themed Settings & Backup modal dialog with pin protection."""
+        self.flush_pending_state()
+        dlg_holder: dict[str, Optional[SettingsDialog]] = {"dlg": None}
+        was_pinned = self.is_pinned
+        self.is_pinned = True
+        try:
+            dlg = SettingsDialog(self)
+            dlg_holder["dlg"] = dlg
+            self._exec_dialog(dlg)
+        finally:
+            self.is_pinned = was_pinned
+        return dlg_holder["dlg"]
+
+    def _copy_calc_result(self) -> bool:
+        if self._current_calc_result is None:
+            return False
+        QApplication.clipboard().setText(self._current_calc_result)
+        self.calc_badge.setText(f"✓ {self._current_calc_result}")
+        QTimer.singleShot(
+            800,
+            lambda: self.calc_badge.setText(f"= {self._current_calc_result}")
+            if _qt_is_valid(self)
+            and _qt_is_valid(self.calc_badge)
+            and self._current_calc_result is not None
+            else None,
+        )
+        return True
+
+    def _on_omni_enter_pressed(self) -> bool:
+        if self._current_calc_result is not None:
+            return self._copy_calc_result()
+        query = self.search_input.text().strip()
+        if not query:
+            return False
+        if self.stack.currentIndex() == 0:
+            shortcuts = self.db.get_shortcuts(
+                query, sort_by_usage=getattr(self.panel_hub, "auto_sort_usage", False)
+            )
+            if shortcuts and hasattr(self.panel_hub, "_launch_shortcut"):
+                self.panel_hub._launch_shortcut(shortcuts[0])
+                return True
+            if hasattr(self.panel_hub, "cycle_note_search_match"):
+                return bool(self.panel_hub.cycle_note_search_match(query))
+            return False
+        clips = self.db.get_clips(query)
+        if clips and hasattr(self.panel_queue, "copy_single_clip"):
+            self.panel_queue.copy_single_clip(clips[0])
+            return True
+        return False
 
     def _show_dock_edge_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -735,6 +1541,7 @@ class SidebarWindow(QWidget):
     # --- Panel & Profile Actions ---
     def switch_to_panel(self, index: int) -> None:
         clamped_idx = 1 if int(index) == 1 else 0
+        prev_idx = self.stack.currentIndex()
         self.stack.setCurrentIndex(clamped_idx)
         self.btn_panel_hub.setChecked(clamped_idx == 0)
         self.btn_panel_queue.setChecked(clamped_idx == 1)
@@ -743,6 +1550,12 @@ class SidebarWindow(QWidget):
         if not self._restoring_state and hasattr(self.db, "set_workspace_setting"):
             self.db.set_workspace_setting("active_panel", clamped_idx)
         self.refresh_views()
+        if (
+            not self._restoring_state
+            and prev_idx != clamped_idx
+            and hasattr(self, "panel_transition")
+        ):
+            self.panel_transition.trigger(165)
 
     def toggle_panel(self) -> None:
         next_idx = 1 if self.stack.currentIndex() == 0 else 0
@@ -818,8 +1631,17 @@ class SidebarWindow(QWidget):
             self.toast.show_toast(content, source_type, queue_count)
 
     def refresh_views(self) -> None:
-        query = self.search_input.text().strip()
-        clips = self.db.get_clips(query)
+        raw_query = self.search_input.text().strip()
+        calc_res = evaluate_math_query(raw_query)
+        self._current_calc_result = calc_res
+        if calc_res is not None:
+            self.calc_badge.setText(f"= {calc_res}")
+            self.calc_badge.show()
+        else:
+            self.calc_badge.hide()
+
+        filter_query = "" if raw_query.startswith("=") else raw_query
+        clips = self.db.get_clips(filter_query)
         badge = f" +{self.unread_clips}" if self.unread_clips > 0 else ""
         self.btn_panel_queue.setText(f"2. Clip Queue ({len(clips)}{badge})")
 
@@ -832,7 +1654,7 @@ class SidebarWindow(QWidget):
 
         for panel in (self.panel_hub, self.panel_queue):
             if hasattr(panel, "refresh"):
-                panel.refresh(query)
+                panel.refresh(filter_query)
 
     # --- Keyboard & Auto-Hide Events ---
     def eventFilter(self, obj, event) -> bool:
@@ -885,6 +1707,87 @@ class SidebarWindow(QWidget):
             return
         super().keyPressEvent(event)
 
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._is_on_resize_border(event.position().toPoint())
+        ):
+            self.reset_sidebar_dimensions()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._is_on_resize_border(event.position().toPoint())
+        ):
+            self._resizing_edge = True
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._resizing_edge:
+            gpos = event.globalPosition().toPoint()
+            screen = (
+                self.screen()
+                or QGuiApplication.screenAt(self.frameGeometry().center())
+                or QGuiApplication.primaryScreen()
+            )
+            avail = self._get_clean_available_geometry(screen)
+            if self.dock_edge == "right":
+                self.set_sidebar_dimensions(
+                    width=avail.right() - gpos.x() + 1,
+                    persist=False,
+                    update_appbar=False,
+                )
+            elif self.dock_edge == "left":
+                self.set_sidebar_dimensions(
+                    width=gpos.x() - avail.left() + 1,
+                    persist=False,
+                    update_appbar=False,
+                )
+            elif self.dock_edge == "top":
+                self.set_sidebar_dimensions(
+                    height=gpos.y() - avail.top() + 1,
+                    persist=False,
+                    update_appbar=False,
+                )
+            elif self.dock_edge == "bottom":
+                self.set_sidebar_dimensions(
+                    height=avail.bottom() - gpos.y() + 1,
+                    persist=False,
+                    update_appbar=False,
+                )
+            event.accept()
+            return
+
+        if self._is_on_resize_border(event.position().toPoint()):
+            cursor = (
+                Qt.CursorShape.SizeVerCursor
+                if self.dock_edge in ("top", "bottom")
+                else Qt.CursorShape.SizeHorCursor
+            )
+            self.setCursor(cursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._resizing_edge:
+            self._resizing_edge = False
+            self.set_sidebar_dimensions(
+                self.sidebar_width,
+                self.sidebar_height,
+                persist=True,
+                update_appbar=True,
+            )
+            self.unsetCursor()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
     def dragEnterEvent(self, event) -> None:
         if _is_droppable_mime(event.mimeData()):
             self._drag_hover_active = True
@@ -932,6 +1835,8 @@ class SidebarWindow(QWidget):
         super().changeEvent(event)
 
     def closeEvent(self, event) -> None:
+        if hasattr(self, "horizon_bar"):
+            self.horizon_bar.stop()
         if hasattr(self, "_edge_drag_timer") and self._edge_drag_timer.isActive():
             self._edge_drag_timer.stop()
         self.flush_pending_state()
