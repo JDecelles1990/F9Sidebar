@@ -1,6 +1,7 @@
 import base64
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -15,6 +16,7 @@ from PySide6.QtCore import (
     QIODevice,
     QMimeData,
     QPoint,
+    QPointF,
     QRect,
     QRectF,
     QSize,
@@ -28,6 +30,7 @@ from PySide6.QtGui import (
     QDesktopServices,
     QDrag,
     QFont,
+    QFontMetrics,
     QGuiApplication,
     QIcon,
     QImage,
@@ -35,8 +38,10 @@ from PySide6.QtGui import (
     QKeySequence,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
+    QPolygonF,
     QShortcut,
     QTextBlockFormat,
     QTextCharFormat,
@@ -44,6 +49,7 @@ from PySide6.QtGui import (
     QTextDocument,
     QTextImageFormat,
     QTransform,
+    QWheelEvent,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -56,6 +62,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -755,39 +762,435 @@ class DroppableGridScrollArea(QScrollArea):
         super().dropEvent(event)
 
 
+class _AnnotationItem:
+    """Editable, movable, and resizable vector annotation layered onto an image canvas."""
+
+    def __init__(
+        self,
+        kind: str,
+        color: Optional[QColor] = None,
+        stroke_width: int = 3,
+        points: Optional[List[QPointF]] = None,
+        start: Optional[QPointF] = None,
+        end: Optional[QPointF] = None,
+        rect: Optional[QRectF] = None,
+        text: str = "",
+        font_px: int = 18,
+        block_size: int = 10,
+    ):
+        self.kind = str(kind).lower().strip()
+        self.color = QColor(color) if color is not None and color.isValid() else QColor("#F38BA8")
+        self.stroke_width = max(1, int(stroke_width))
+        self.points: List[QPointF] = [QPointF(p) for p in (points or [])]
+        self.start = QPointF(start) if start is not None else QPointF()
+        self.end = QPointF(end) if end is not None else QPointF()
+        self.rect = QRectF(rect).normalized() if rect is not None else QRectF()
+        self.text = str(text or "")
+        self.font_px = max(8, int(font_px))
+        self.block_size = max(2, int(block_size))
+
+    def clone(self) -> "_AnnotationItem":
+        return _AnnotationItem(
+            kind=self.kind,
+            color=self.color,
+            stroke_width=self.stroke_width,
+            points=self.points,
+            start=self.start,
+            end=self.end,
+            rect=self.rect,
+            text=self.text,
+            font_px=self.font_px,
+            block_size=self.block_size,
+        )
+
+    def bounding_rect(self) -> QRectF:
+        if self.kind in ("pen", "highlighter"):
+            if not self.points:
+                return QRectF()
+            min_x = min(p.x() for p in self.points)
+            max_x = max(p.x() for p in self.points)
+            min_y = min(p.y() for p in self.points)
+            max_y = max(p.y() for p in self.points)
+            if (max_x - min_x) < 10.0:
+                cx = (min_x + max_x) / 2.0
+                min_x, max_x = cx - 5.0, cx + 5.0
+            if (max_y - min_y) < 10.0:
+                cy = (min_y + max_y) / 2.0
+                min_y, max_y = cy - 5.0, cy + 5.0
+            return QRectF(min_x, min_y, max_x - min_x, max_y - min_y)
+        if self.kind in ("line", "arrow"):
+            r = QRectF(self.start, self.end).normalized()
+            if r.width() < 10.0:
+                r.setLeft(r.center().x() - 5.0)
+                r.setWidth(10.0)
+            if r.height() < 10.0:
+                r.setTop(r.center().y() - 5.0)
+                r.setHeight(10.0)
+            return r
+        return QRectF(self.rect).normalized()
+
+    def translate(self, dx: float, dy: float) -> None:
+        if self.kind in ("pen", "highlighter"):
+            self.points = [QPointF(p.x() + dx, p.y() + dy) for p in self.points]
+        elif self.kind in ("line", "arrow"):
+            self.start = QPointF(self.start.x() + dx, self.start.y() + dy)
+            self.end = QPointF(self.end.x() + dx, self.end.y() + dy)
+        else:
+            self.rect = QRectF(self.rect).translated(dx, dy)
+
+    def resize_from_snapshot(
+        self, orig: "_AnnotationItem", orig_rect: QRectF, new_rect: QRectF
+    ) -> None:
+        nr = QRectF(new_rect).normalized()
+        if nr.width() < 6.0:
+            nr.setWidth(6.0)
+        if nr.height() < 6.0:
+            nr.setHeight(6.0)
+        ow = max(1.0, orig_rect.width())
+        oh = max(1.0, orig_rect.height())
+
+        if self.kind in ("pen", "highlighter"):
+            self.points = [
+                QPointF(
+                    nr.left() + ((p.x() - orig_rect.left()) / ow) * nr.width(),
+                    nr.top() + ((p.y() - orig_rect.top()) / oh) * nr.height(),
+                )
+                for p in orig.points
+            ]
+        elif self.kind in ("line", "arrow"):
+            self.start = QPointF(
+                nr.left() + ((orig.start.x() - orig_rect.left()) / ow) * nr.width(),
+                nr.top() + ((orig.start.y() - orig_rect.top()) / oh) * nr.height(),
+            )
+            self.end = QPointF(
+                nr.left() + ((orig.end.x() - orig_rect.left()) / ow) * nr.width(),
+                nr.top() + ((orig.end.y() - orig_rect.top()) / oh) * nr.height(),
+            )
+        elif self.kind == "text":
+            self.rect = nr
+            scale = nr.height() / max(1.0, orig_rect.height())
+            self.font_px = max(8, min(240, int(round(orig.font_px * scale))))
+        else:
+            self.rect = nr
+
+    @staticmethod
+    def _point_segment_distance(pt: QPointF, a: QPointF, b: QPointF) -> float:
+        abx = b.x() - a.x()
+        aby = b.y() - a.y()
+        len_sq = abx * abx + aby * aby
+        if len_sq <= 1e-6:
+            return math.hypot(pt.x() - a.x(), pt.y() - a.y())
+        t = max(0.0, min(1.0, ((pt.x() - a.x()) * abx + (pt.y() - a.y()) * aby) / len_sq))
+        px = a.x() + t * abx
+        py = a.y() + t * aby
+        return math.hypot(pt.x() - px, pt.y() - py)
+
+    def hit_test(self, img_pt: QPointF, tolerance: float = 8.0) -> bool:
+        if self.kind in ("line", "arrow"):
+            tol = max(float(tolerance), float(self.stroke_width) + 4.0)
+            return self._point_segment_distance(img_pt, self.start, self.end) <= tol
+        if self.kind in ("pen", "highlighter"):
+            eff_w = (
+                max(16.0, self.stroke_width * 4.0)
+                if self.kind == "highlighter"
+                else float(self.stroke_width)
+            )
+            tol = max(float(tolerance), eff_w / 2.0 + 4.0)
+            if not self.bounding_rect().adjusted(-tol, -tol, tol, tol).contains(img_pt):
+                return False
+            if len(self.points) == 1:
+                p0 = self.points[0]
+                return math.hypot(img_pt.x() - p0.x(), img_pt.y() - p0.y()) <= tol
+            if len(self.points) <= 400:
+                return any(
+                    self._point_segment_distance(img_pt, self.points[i], self.points[i + 1]) <= tol
+                    for i in range(len(self.points) - 1)
+                )
+            return True
+        return (
+            self.bounding_rect()
+            .adjusted(-tolerance, -tolerance, tolerance, tolerance)
+            .contains(img_pt)
+        )
+
+    def paint_on(self, target_img: QImage) -> QImage:
+        if target_img.isNull():
+            return target_img
+        if self.kind in ("pen", "highlighter"):
+            pts = [p.toPoint() for p in self.points]
+            return _ImagePreviewCanvas._render_path_on_image(
+                target_img,
+                pts,
+                self.color,
+                self.stroke_width,
+                is_highlighter=(self.kind == "highlighter"),
+            )
+        if self.kind in ("line", "arrow"):
+            return _ImagePreviewCanvas._render_shape_on_image(
+                target_img,
+                self.kind,
+                self.start.toPoint(),
+                self.end.toPoint(),
+                self.color,
+                self.stroke_width,
+            )
+        if self.kind in ("rect", "ellipse"):
+            r = self.rect.normalized().toRect()
+            return _ImagePreviewCanvas._render_shape_on_image(
+                target_img,
+                self.kind,
+                r.topLeft(),
+                r.bottomRight(),
+                self.color,
+                self.stroke_width,
+            )
+        if self.kind == "pixelate":
+            pix = _ImagePreviewCanvas._render_pixelated_on_image(
+                target_img, self.rect.normalized().toRect(), block_size=self.block_size
+            )
+            return pix if pix is not None else target_img
+        if self.kind == "text":
+            if not self.text.strip():
+                return target_img
+            out = target_img.convertToFormat(QImage.Format.Format_ARGB32).copy()
+            draw_color = QColor(self.color)
+            draw_color.setAlpha(255)
+            painter = QPainter(out)
+            try:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+                font = QFont("Segoe UI", -1, QFont.Weight.Bold)
+                font.setPixelSize(max(8, self.font_px))
+                painter.setFont(font)
+                r = QRectF(self.rect).normalized()
+                flags = (
+                    Qt.AlignmentFlag.AlignLeft
+                    | Qt.AlignmentFlag.AlignVCenter
+                    | Qt.TextFlag.TextDontClip
+                )
+                shadow = QColor("#11111B")
+                shadow.setAlpha(200)
+                painter.setPen(shadow)
+                painter.drawText(r.translated(1.0, 1.0), flags, self.text)
+                painter.setPen(draw_color)
+                painter.drawText(r, flags, self.text)
+            finally:
+                painter.end()
+            return out
+        return target_img
+
+
 class _ImagePreviewCanvas(QWidget):
-    """Interactive image preview supporting crop marquee selection and freehand drawing."""
+    """Interactive full-screen image canvas with layer move/resize handles, Alt+Drag pan, highlighter, shapes, text, pixelate, eyedropper, and zoom."""
+
+    VALID_TOOLS = (
+        "select",
+        "crop",
+        "pen",
+        "highlighter",
+        "line",
+        "arrow",
+        "rect",
+        "ellipse",
+        "text",
+        "pixelate",
+        "eyedropper",
+    )
 
     def __init__(
         self,
         image: QImage,
         on_image_modified: Optional[Callable[[], None]] = None,
+        on_before_modify: Optional[Callable[[], None]] = None,
+        on_text_requested: Optional[Callable[[QPoint], None]] = None,
+        on_color_sampled: Optional[Callable[[QColor], None]] = None,
+        on_zoom_changed: Optional[Callable[[float], None]] = None,
+        on_selection_changed: Optional[Callable[[Optional[int]], None]] = None,
+        on_edit_text_item: Optional[Callable[[int], None]] = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
-        self._image = image
+        self._base_image = image.convertToFormat(QImage.Format.Format_ARGB32)
+        self._items: List[_AnnotationItem] = []
+        self._selected_index: Optional[int] = None
+        self._image = self._base_image.copy()
+
         self._on_image_modified = on_image_modified
+        self._on_before_modify = on_before_modify
+        self._on_text_requested = on_text_requested
+        self._on_color_sampled = on_color_sampled
+        self._on_zoom_changed = on_zoom_changed
+        self._on_selection_changed = on_selection_changed
+        self._on_edit_text_item = on_edit_text_item
+
+        self.tool_mode = "crop"
         self._draw_mode = False
         self.pen_color = QColor("#F38BA8")
         self.pen_width = 3
+        self._zoom_factor = 1.0
+        self._pan_offset = QPoint(0, 0)
+
         self._crop_rect: Optional[QRect] = None
         self._drag_origin_img: Optional[QPoint] = None
+        self._drag_current_img: Optional[QPoint] = None
+        self._stroke_base_image: Optional[QImage] = None
+        self._stroke_points: List[QPoint] = []
         self._last_draw_pt: Optional[QPoint] = None
-        self.setMinimumSize(280, 180)
+        self._panning = False
+        self._pan_last_pos: Optional[QPoint] = None
+        self._render_cache_key: Optional[Tuple[int, int, int, float]] = None
+        self._render_cache_image: Optional[QImage] = None
+
+        self._interaction: Optional[str] = None
+        self._active_handle: Optional[str] = None
+        self._orig_item_snapshot: Optional[_AnnotationItem] = None
+        self._orig_item_bounds: Optional[QRectF] = None
+        self._move_origin_img: Optional[QPointF] = None
+        self._drag_undo_pushed = False
+
+        self.setMinimumSize(320, 220)
+        self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
+    def get_image(self) -> QImage:
+        return self._image
+
+    def get_state_snapshot(
+        self,
+    ) -> Tuple[QImage, List[_AnnotationItem], Optional[int]]:
+        return (
+            self._base_image.copy(),
+            [it.clone() for it in self._items],
+            self._selected_index,
+        )
+
+    def restore_state_snapshot(
+        self,
+        base_image: QImage,
+        items: List[_AnnotationItem],
+        selected_index: Optional[int],
+    ) -> None:
+        self._base_image = base_image.convertToFormat(QImage.Format.Format_ARGB32).copy()
+        self._items = [it.clone() for it in items]
+        self._selected_index = (
+            selected_index
+            if selected_index is not None and 0 <= selected_index < len(self._items)
+            else None
+        )
+        self._crop_rect = None
+        self._interaction = None
+        self._recompose(notify=False)
+        if self._on_selection_changed is not None:
+            self._on_selection_changed(self._selected_index)
+
     def set_image(self, image: QImage, clear_crop: bool = True) -> None:
-        self._image = image
+        self._base_image = image.convertToFormat(QImage.Format.Format_ARGB32).copy()
+        self._items.clear()
+        self._selected_index = None
+        self._image = self._base_image.copy()
+        self._render_cache_key = None
+        self._render_cache_image = None
+        self._stroke_base_image = None
+        self._stroke_points = []
+        self._last_draw_pt = None
+        self._drag_origin_img = None
+        self._drag_current_img = None
+        self._interaction = None
         if clear_crop:
             self._crop_rect = None
         self.update()
+        if self._on_selection_changed is not None:
+            self._on_selection_changed(None)
+
+    def _recompose(self, notify: bool = True) -> None:
+        composed = self._base_image.copy()
+        for item in self._items:
+            composed = item.paint_on(composed)
+        self._image = composed
+        self._render_cache_key = None
+        self._render_cache_image = None
+        self.update()
+        if notify and self._on_image_modified is not None:
+            self._on_image_modified()
+
+    def flatten_items(self) -> QImage:
+        """Bakes active vector items into _base_image cleanly before bitmap transforms."""
+        if self._items:
+            self._recompose(notify=False)
+            self._base_image = self._image.copy()
+            self._items.clear()
+        self._selected_index = None
+        self.update()
+        return self._base_image
+
+    def add_item(self, item: _AnnotationItem, select: bool = True) -> int:
+        self._items.append(item)
+        idx = len(self._items) - 1
+        if select:
+            self._selected_index = idx
+        self._recompose(notify=True)
+        if select and self._on_selection_changed is not None:
+            self._on_selection_changed(self._selected_index)
+        return idx
+
+    def get_selected_item(self) -> Optional[_AnnotationItem]:
+        if self._selected_index is not None and 0 <= self._selected_index < len(self._items):
+            return self._items[self._selected_index]
+        return None
+
+    def select_item(self, idx: Optional[int]) -> None:
+        new_idx = (
+            int(idx)
+            if idx is not None and 0 <= int(idx) < len(self._items)
+            else None
+        )
+        if new_idx != self._selected_index:
+            self._selected_index = new_idx
+            self.update()
+            if self._on_selection_changed is not None:
+                self._on_selection_changed(self._selected_index)
+
+    def delete_selected_item(self) -> bool:
+        if self._selected_index is None or not (0 <= self._selected_index < len(self._items)):
+            return False
+        self._items.pop(self._selected_index)
+        self._selected_index = None
+        self._recompose(notify=True)
+        if self._on_selection_changed is not None:
+            self._on_selection_changed(None)
+        return True
+
+    def set_tool_mode(self, mode: str) -> None:
+        norm = str(mode or "crop").lower().strip()
+        if norm not in self.VALID_TOOLS:
+            norm = "crop"
+        self.tool_mode = norm
+        self._draw_mode = norm not in ("crop", "select")
+        self._drag_origin_img = None
+        self._drag_current_img = None
+        self._last_draw_pt = None
+        self._interaction = None
+        if norm != "crop":
+            self._crop_rect = None
+        self.setCursor(self._default_tool_cursor())
+        self.update()
+
+    def _default_tool_cursor(self) -> Qt.CursorShape:
+        if self.tool_mode == "text":
+            return Qt.CursorShape.IBeamCursor
+        if self.tool_mode == "select":
+            return Qt.CursorShape.ArrowCursor
+        return Qt.CursorShape.CrossCursor
 
     def set_draw_mode(self, enabled: bool) -> None:
-        self._draw_mode = bool(enabled)
+        self.set_tool_mode("pen" if enabled else "crop")
 
     def set_pen_color(self, color: QColor) -> None:
         if color.isValid():
             self.pen_color = QColor(color)
+
+    def set_pen_width(self, width: int) -> None:
+        self.pen_width = max(1, min(80, int(width)))
 
     def get_crop_rect(self) -> Optional[QRect]:
         return self._crop_rect
@@ -796,16 +1199,60 @@ class _ImagePreviewCanvas(QWidget):
         self._crop_rect = None
         self.update()
 
+    def set_zoom(self, factor: float) -> float:
+        clamped = max(0.25, min(6.0, float(factor)))
+        self._zoom_factor = clamped
+        if abs(clamped - 1.0) < 1e-4:
+            self._pan_offset = QPoint(0, 0)
+        self.update()
+        if self._on_zoom_changed is not None:
+            self._on_zoom_changed(self._zoom_factor)
+        return self._zoom_factor
+
+    def zoom_in(self) -> float:
+        return self.set_zoom(self._zoom_factor * 1.2)
+
+    def zoom_out(self) -> float:
+        return self.set_zoom(self._zoom_factor / 1.2)
+
+    def reset_zoom(self) -> float:
+        self._pan_offset = QPoint(0, 0)
+        return self.set_zoom(1.0)
+
+    def get_visible_image_center(self) -> QPoint:
+        pt = self._widget_to_image_point(self.rect().center())
+        if pt is not None:
+            return pt
+        return QPoint(
+            max(0, self._base_image.width() // 2),
+            max(0, self._base_image.height() // 2),
+        )
+
     def _image_target_rect(self) -> QRect:
-        bounds = self.rect().adjusted(6, 6, -6, -6)
+        bounds = self.rect().adjusted(8, 8, -8, -8)
         if bounds.width() <= 0 or bounds.height() <= 0 or self._image.isNull():
             return QRect()
-        scaled_size = self._image.size().scaled(
+        base_size = self._image.size().scaled(
             bounds.size(), Qt.AspectRatioMode.KeepAspectRatio
         )
-        x = bounds.x() + (bounds.width() - scaled_size.width()) // 2
-        y = bounds.y() + (bounds.height() - scaled_size.height()) // 2
-        return QRect(x, y, scaled_size.width(), scaled_size.height())
+        zw = max(1, int(round(base_size.width() * self._zoom_factor)))
+        zh = max(1, int(round(base_size.height() * self._zoom_factor)))
+        x = bounds.x() + (bounds.width() - zw) // 2 + self._pan_offset.x()
+        y = bounds.y() + (bounds.height() - zh) // 2 + self._pan_offset.y()
+        return QRect(x, y, zw, zh)
+
+    def _widget_to_image_float(
+        self, pt: QPointF, clamp: bool = True
+    ) -> Optional[QPointF]:
+        target = self._image_target_rect()
+        if target.isEmpty() or self._image.isNull():
+            return None
+        ix = ((pt.x() - target.x()) / max(1, target.width())) * self._image.width()
+        iy = ((pt.y() - target.y()) / max(1, target.height())) * self._image.height()
+        if clamp:
+            ix = max(0.0, min(float(self._image.width()), ix))
+            iy = max(0.0, min(float(self._image.height()), iy))
+        return QPointF(ix, iy)
 
     def _widget_to_image_point(self, pt: QPoint) -> Optional[QPoint]:
         target = self._image_target_rect()
@@ -813,11 +1260,39 @@ class _ImagePreviewCanvas(QWidget):
             return None
         rx = max(0.0, min(1.0, (pt.x() - target.x()) / max(1, target.width())))
         ry = max(0.0, min(1.0, (pt.y() - target.y()) / max(1, target.height())))
-        ix = min(self._image.width() - 1, max(0, int(round(rx * self._image.width()))))
-        iy = min(self._image.height() - 1, max(0, int(round(ry * self._image.height()))))
+        ix = min(
+            self._image.width() - 1,
+            max(0, int(rx * self._image.width())),
+        )
+        iy = min(
+            self._image.height() - 1,
+            max(0, int(ry * self._image.height())),
+        )
         return QPoint(ix, iy)
 
+    def _image_float_point_to_widget(self, img_pt: QPointF) -> QPointF:
+        target = self._image_target_rect()
+        if target.isEmpty() or self._image.isNull():
+            return QPointF()
+        sx = target.width() / max(1, self._image.width())
+        sy = target.height() / max(1, self._image.height())
+        return QPointF(target.x() + img_pt.x() * sx, target.y() + img_pt.y() * sy)
+
+    def _image_point_to_widget(self, img_pt: QPoint) -> QPointF:
+        target = self._image_target_rect()
+        if target.isEmpty() or self._image.isNull():
+            return QPointF()
+        sx = target.width() / max(1, self._image.width())
+        sy = target.height() / max(1, self._image.height())
+        return QPointF(
+            target.x() + (img_pt.x() + 0.5) * sx,
+            target.y() + (img_pt.y() + 0.5) * sy,
+        )
+
     def _image_rect_to_widget(self, img_rect: QRect) -> QRectF:
+        return self._image_rect_to_widget_f(QRectF(img_rect))
+
+    def _image_rect_to_widget_f(self, img_rect: QRectF) -> QRectF:
         target = self._image_target_rect()
         if target.isEmpty() or self._image.isNull():
             return QRectF()
@@ -830,34 +1305,224 @@ class _ImagePreviewCanvas(QWidget):
             img_rect.height() * sy,
         )
 
-    def _draw_segment(self, start: QPoint, end: QPoint) -> None:
-        if self._image.isNull():
-            return
-        painter = QPainter(self._image)
+    def _img_hit_tolerance(self) -> float:
+        target = self._image_target_rect()
+        if target.isEmpty() or self._image.isNull():
+            return 8.0
+        return max(8.0, 10.0 * (self._image.width() / max(1, target.width())))
+
+    def get_handle_widget_rects(self, item: _AnnotationItem) -> Dict[str, QRectF]:
+        """Returns 10x10 widget-space handle rects for moving/resizing an annotation item."""
+        half = 5.0
+        if item.kind in ("line", "arrow"):
+            p1 = self._image_float_point_to_widget(item.start)
+            p2 = self._image_float_point_to_widget(item.end)
+            return {
+                "p_start": QRectF(p1.x() - half, p1.y() - half, half * 2, half * 2),
+                "p_end": QRectF(p2.x() - half, p2.y() - half, half * 2, half * 2),
+            }
+        wrect = self._image_rect_to_widget_f(item.bounding_rect())
+        if wrect.isNull():
+            return {}
+        cx = wrect.center().x()
+        cy = wrect.center().y()
+        coords = {
+            "nw": QPointF(wrect.left(), wrect.top()),
+            "n": QPointF(cx, wrect.top()),
+            "ne": QPointF(wrect.right(), wrect.top()),
+            "e": QPointF(wrect.right(), cy),
+            "se": QPointF(wrect.right(), wrect.bottom()),
+            "s": QPointF(cx, wrect.bottom()),
+            "sw": QPointF(wrect.left(), wrect.bottom()),
+            "w": QPointF(wrect.left(), cy),
+        }
+        return {
+            name: QRectF(pt.x() - half, pt.y() - half, half * 2, half * 2)
+            for name, pt in coords.items()
+        }
+
+    def _hit_test_handle(self, widget_pt: QPointF) -> Optional[str]:
+        item = self.get_selected_item()
+        if item is None:
+            return None
+        for name, hrect in self.get_handle_widget_rects(item).items():
+            if hrect.adjusted(-4.0, -4.0, 4.0, 4.0).contains(widget_pt):
+                return name
+        return None
+
+    def _find_item_at_point(self, img_pt: QPointF) -> Optional[int]:
+        tol = self._img_hit_tolerance()
+        for idx in range(len(self._items) - 1, -1, -1):
+            if self._items[idx].hit_test(img_pt, tolerance=tol):
+                return idx
+        return None
+
+    @staticmethod
+    def _handle_cursor(name: str) -> Qt.CursorShape:
+        if name in ("nw", "se"):
+            return Qt.CursorShape.SizeFDiagCursor
+        if name in ("ne", "sw"):
+            return Qt.CursorShape.SizeBDiagCursor
+        if name in ("n", "s"):
+            return Qt.CursorShape.SizeVerCursor
+        if name in ("e", "w"):
+            return Qt.CursorShape.SizeHorCursor
+        return Qt.CursorShape.SizeAllCursor
+
+    @staticmethod
+    def _render_path_on_image(
+        base_img: QImage,
+        points: List[QPoint],
+        color: QColor,
+        width: int,
+        is_highlighter: bool = False,
+    ) -> QImage:
+        out = base_img.convertToFormat(QImage.Format.Format_ARGB32).copy()
+        if out.isNull() or not points:
+            return out
+        draw_color = QColor(color)
+        stroke_w = max(1, int(width))
+        if is_highlighter:
+            draw_color.setAlpha(95)
+            stroke_w = max(16, stroke_w * 4)
+        else:
+            draw_color.setAlpha(255)
+
+        painter = QPainter(out)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            if len(points) == 1:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(draw_color)
+                r = max(1.0, stroke_w / 2.0)
+                painter.drawEllipse(QPointF(points[0]), r, r)
+            else:
+                path = QPainterPath()
+                path.moveTo(QPointF(points[0]))
+                for pt in points[1:]:
+                    path.lineTo(QPointF(pt))
+                pen = QPen(
+                    draw_color,
+                    stroke_w,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+                painter.setPen(pen)
+                painter.drawPath(path)
+        finally:
+            painter.end()
+        return out
+
+    @staticmethod
+    def _render_shape_on_image(
+        base_img: QImage,
+        kind: str,
+        start: QPoint,
+        end: QPoint,
+        color: QColor,
+        width: int,
+    ) -> QImage:
+        out = base_img.convertToFormat(QImage.Format.Format_ARGB32).copy()
+        if out.isNull():
+            return out
+        draw_color = QColor(color)
+        draw_color.setAlpha(255)
+        stroke_w = max(1, int(width))
+
+        painter = QPainter(out)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             pen = QPen(
-                self.pen_color,
-                self.pen_width,
+                draw_color,
+                stroke_w,
                 Qt.PenStyle.SolidLine,
                 Qt.PenCapStyle.RoundCap,
                 Qt.PenJoinStyle.RoundJoin,
             )
             painter.setPen(pen)
-            if start == end:
-                painter.drawPoint(start)
-            else:
-                painter.drawLine(start, end)
+            if kind == "line":
+                painter.drawLine(QPointF(start), QPointF(end))
+            elif kind == "arrow":
+                dx = float(end.x() - start.x())
+                dy = float(end.y() - start.y())
+                length = math.hypot(dx, dy)
+                if length >= 1.0:
+                    angle = math.atan2(dy, dx)
+                    head_len = min(max(10.0, stroke_w * 4.0), max(10.0, length * 0.65))
+                    spread = math.radians(28)
+                    p1 = QPointF(
+                        end.x() - head_len * math.cos(angle - spread),
+                        end.y() - head_len * math.sin(angle - spread),
+                    )
+                    p2 = QPointF(
+                        end.x() - head_len * math.cos(angle + spread),
+                        end.y() - head_len * math.sin(angle + spread),
+                    )
+                    shaft_end = QPointF(
+                        end.x() - (head_len * 0.55) * math.cos(angle),
+                        end.y() - (head_len * 0.55) * math.sin(angle),
+                    )
+                    painter.drawLine(QPointF(start), shaft_end)
+                    painter.setBrush(draw_color)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.drawPolygon(QPolygonF([QPointF(end), p1, p2]))
+                else:
+                    painter.drawPoint(start)
+            elif kind == "rect":
+                rect = QRect(start, end).normalized()
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(rect)
+            elif kind == "ellipse":
+                rect = QRect(start, end).normalized()
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(rect)
         finally:
             painter.end()
-        self.update()
-        if self._on_image_modified is not None:
-            self._on_image_modified()
+        return out
+
+    @staticmethod
+    def _render_pixelated_on_image(
+        base_img: QImage, rect: QRect, block_size: int = 10
+    ) -> Optional[QImage]:
+        bounded = rect.normalized().intersected(base_img.rect())
+        if bounded.width() < 4 or bounded.height() < 4:
+            return None
+        out = base_img.convertToFormat(QImage.Format.Format_ARGB32).copy()
+        sub = out.copy(bounded)
+        bsize = max(2, int(block_size))
+        tiny = sub.scaled(
+            max(1, bounded.width() // bsize),
+            max(1, bounded.height() // bsize),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        mosaic = tiny.scaled(
+            bounded.size(),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        painter = QPainter(out)
+        try:
+            painter.drawImage(bounded.topLeft(), mosaic)
+        finally:
+            painter.end()
+        return out
+
+    def _draw_segment(self, start: QPoint, end: QPoint) -> None:
+        if self._image.isNull():
+            return
+        pts = [start] if start == end else [start, end]
+        is_hl = self.tool_mode == "highlighter"
+        self._base_image = self._render_path_on_image(
+            self._base_image, pts, self.pen_color, self.pen_width, is_highlighter=is_hl
+        )
+        self._recompose(notify=True)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         try:
-            painter.fillRect(self.rect(), QColor("#181825"))
+            painter.fillRect(self.rect(), QColor("#141320"))
             painter.setPen(QPen(QColor("#363A4F"), 1))
             painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
@@ -866,25 +1531,214 @@ class _ImagePreviewCanvas(QWidget):
                 return
 
             painter.fillRect(target, QColor("#2A2D3E"))
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            painter.drawImage(target, self._image)
+            dpr = max(1.0, float(self.devicePixelRatioF()))
+            phys_w = max(1, int(round(target.width() * dpr)))
+            phys_h = max(1, int(round(target.height() * dpr)))
+            if phys_w < self._image.width() or phys_h < self._image.height():
+                cache_key = (int(self._image.cacheKey()), phys_w, phys_h, dpr)
+                if self._render_cache_key != cache_key or self._render_cache_image is None:
+                    scaled = self._image.scaled(
+                        phys_w,
+                        phys_h,
+                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    scaled.setDevicePixelRatio(dpr)
+                    self._render_cache_key = cache_key
+                    self._render_cache_image = scaled
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+                painter.drawImage(target, self._render_cache_image)
+            else:
+                use_smooth = phys_w <= int(self._image.width() * 1.5)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, use_smooth)
+                painter.drawImage(target, self._image)
 
             if self._crop_rect is not None and self._crop_rect.isValid():
                 overlay = self._image_rect_to_widget(self._crop_rect)
-                painter.setPen(QPen(QColor("#89B4FA"), 2, Qt.PenStyle.DashLine))
-                painter.setBrush(QColor(137, 180, 250, 35))
+                box_color = (
+                    QColor("#F38BA8")
+                    if self.tool_mode == "pixelate"
+                    else QColor("#89B4FA")
+                )
+                painter.setPen(QPen(box_color, 2, Qt.PenStyle.DashLine))
+                fill_color = QColor(box_color)
+                fill_color.setAlpha(40)
+                painter.setBrush(fill_color)
                 painter.drawRect(overlay)
+
+                dim_txt = f"{self._crop_rect.width()} × {self._crop_rect.height()}"
+                badge_rect = QRectF(overlay.left(), max(4.0, overlay.top() - 22.0), 104, 18)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(24, 24, 37, 210))
+                painter.drawRoundedRect(badge_rect, 4, 4)
+                painter.setPen(QColor("#F9E2AF"))
+                painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, dim_txt)
+
+            if (
+                self._interaction == "draw_shape"
+                and self.tool_mode in ("line", "arrow", "rect", "ellipse")
+                and self._drag_origin_img is not None
+                and self._drag_current_img is not None
+            ):
+                p_start = self._image_point_to_widget(self._drag_origin_img)
+                p_end = self._image_point_to_widget(self._drag_current_img)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                preview_pen = QPen(self.pen_color, max(1, self.pen_width), Qt.PenStyle.DashLine)
+                painter.setPen(preview_pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                if self.tool_mode in ("line", "arrow"):
+                    painter.drawLine(p_start, p_end)
+                elif self.tool_mode == "rect":
+                    painter.drawRect(QRectF(p_start, p_end).normalized())
+                elif self.tool_mode == "ellipse":
+                    painter.drawEllipse(QRectF(p_start, p_end).normalized())
+
+            # Selection bounding box & resize handles for active vector item
+            sel_item = self.get_selected_item()
+            if sel_item is not None:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                if sel_item.kind in ("line", "arrow"):
+                    p1 = self._image_float_point_to_widget(sel_item.start)
+                    p2 = self._image_float_point_to_widget(sel_item.end)
+                    painter.setPen(QPen(QColor("#F9E2AF"), 1.5, Qt.PenStyle.DashLine))
+                    painter.drawLine(p1, p2)
+                else:
+                    wbox = self._image_rect_to_widget_f(sel_item.bounding_rect())
+                    painter.setPen(QPen(QColor("#F9E2AF"), 1.5, Qt.PenStyle.DashLine))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRect(wbox.adjusted(-2.0, -2.0, 2.0, 2.0))
+
+                painter.setPen(QPen(QColor("#181624"), 1.5))
+                painter.setBrush(QColor("#FAB387"))
+                for hrect in self.get_handle_widget_rects(sel_item).values():
+                    painter.drawRoundedRect(hrect, 2.0, 2.0)
         finally:
             painter.end()
 
-    def mousePressEvent(self, event: QMouseEvent) -> None:
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        delta = event.angleDelta().y()
+        if delta > 0:
+            self.zoom_in()
+            event.accept()
+            return
+        if delta < 0:
+            self.zoom_out()
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            img_pt = self._widget_to_image_point(event.position().toPoint())
+            img_pt_f = self._widget_to_image_float(event.position())
+            if img_pt_f is not None:
+                hit_idx = self._find_item_at_point(img_pt_f)
+                if (
+                    hit_idx is not None
+                    and self._items[hit_idx].kind == "text"
+                    and self._on_edit_text_item is not None
+                ):
+                    self.select_item(hit_idx)
+                    self._on_edit_text_item(hit_idx)
+                    event.accept()
+                    return
+        super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        alt_held = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+        if event.button() in (
+            Qt.MouseButton.MiddleButton,
+            Qt.MouseButton.RightButton,
+        ) or (event.button() == Qt.MouseButton.LeftButton and alt_held):
+            self._panning = True
+            self._pan_last_pos = event.position().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos_f = event.position()
+            # 1. Resize handle hit on currently selected item takes highest priority
+            handle_name = self._hit_test_handle(pos_f)
+            sel_item = self.get_selected_item()
+            if handle_name is not None and sel_item is not None:
+                self._interaction = "resize"
+                self._active_handle = handle_name
+                self._orig_item_snapshot = sel_item.clone()
+                self._orig_item_bounds = sel_item.bounding_rect()
+                self._drag_undo_pushed = False
+                self.setCursor(self._handle_cursor(handle_name))
+                event.accept()
+                return
+
+            img_pt_f = self._widget_to_image_float(pos_f)
+            if img_pt_f is None:
+                super().mousePressEvent(event)
+                return
+
+            # 2. Clicking inside the currently selected item starts moving it
+            if sel_item is not None and sel_item.hit_test(
+                img_pt_f, tolerance=self._img_hit_tolerance()
+            ):
+                self._interaction = "move"
+                self._orig_item_snapshot = sel_item.clone()
+                self._move_origin_img = img_pt_f
+                self._drag_undo_pushed = False
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+                event.accept()
+                return
+
+            # 3. In select mode, hit-test all items top-to-bottom to pick & move one
+            if self.tool_mode == "select":
+                hit_idx = self._find_item_at_point(img_pt_f)
+                self.select_item(hit_idx)
+                if hit_idx is not None:
+                    self._interaction = "move"
+                    self._orig_item_snapshot = self._items[hit_idx].clone()
+                    self._move_origin_img = img_pt_f
+                    self._drag_undo_pushed = False
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                event.accept()
+                return
+
+            # Clicking elsewhere starts a fresh tool operation
+            self.select_item(None)
+            img_pt = self._widget_to_image_point(pos_f.toPoint())
             if img_pt is not None:
-                if self._draw_mode:
+                if self.tool_mode == "text":
+                    if self._on_text_requested is not None:
+                        self._on_text_requested(img_pt)
+                    event.accept()
+                    return
+                if self.tool_mode == "eyedropper":
+                    if not self._image.isNull() and self._image.rect().contains(img_pt):
+                        sampled = self._image.pixelColor(img_pt)
+                        if sampled.isValid():
+                            self.set_pen_color(sampled)
+                            if self._on_color_sampled is not None:
+                                self._on_color_sampled(sampled)
+                    event.accept()
+                    return
+                if self.tool_mode in ("pen", "highlighter"):
+                    if self._on_before_modify is not None:
+                        self._on_before_modify()
+                    self._interaction = "draw_path"
+                    self._stroke_points = [img_pt]
                     self._last_draw_pt = img_pt
-                    self._draw_segment(img_pt, img_pt)
+                    new_item = _AnnotationItem(
+                        kind=self.tool_mode,
+                        color=self.pen_color,
+                        stroke_width=self.pen_width,
+                        points=[QPointF(img_pt)],
+                    )
+                    self.add_item(new_item, select=True)
+                elif self.tool_mode in ("line", "arrow", "rect", "ellipse"):
+                    self._interaction = "draw_shape"
+                    self._drag_origin_img = img_pt
+                    self._drag_current_img = img_pt
+                    self.update()
                 else:
+                    # crop or pixelate marquee
+                    self._interaction = "marquee"
                     self._drag_origin_img = img_pt
                     self._crop_rect = None
                     self.update()
@@ -893,26 +1747,229 @@ class _ImagePreviewCanvas(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._panning and self._pan_last_pos is not None:
+            cur = event.position().toPoint()
+            self._pan_offset += cur - self._pan_last_pos
+            self._pan_last_pos = cur
+            self.update()
+            event.accept()
+            return
+
+        if (event.buttons() & Qt.MouseButton.LeftButton) and self._interaction in (
+            "move",
+            "resize",
+        ):
+            cur_f = self._widget_to_image_float(event.position(), clamp=True)
+            if (
+                cur_f is not None
+                and self._selected_index is not None
+                and 0 <= self._selected_index < len(self._items)
+                and self._orig_item_snapshot is not None
+            ):
+                if (
+                    self._interaction == "move"
+                    and self._move_origin_img is not None
+                ):
+                    dx = cur_f.x() - self._move_origin_img.x()
+                    dy = cur_f.y() - self._move_origin_img.y()
+                    if abs(dx) >= 0.5 or abs(dy) >= 0.5:
+                        if not self._drag_undo_pushed:
+                            # Temporarily restore pre-drag item so undo snapshot records original coords
+                            self._items[self._selected_index] = self._orig_item_snapshot.clone()
+                            self._recompose(notify=False)
+                            if self._on_before_modify is not None:
+                                self._on_before_modify()
+                            self._drag_undo_pushed = True
+                        moved = self._orig_item_snapshot.clone()
+                        moved.translate(dx, dy)
+                        self._items[self._selected_index] = moved
+                        self._recompose(notify=True)
+                elif (
+                    self._interaction == "resize"
+                    and self._active_handle is not None
+                    and self._orig_item_bounds is not None
+                ):
+                    if not self._drag_undo_pushed:
+                        self._items[self._selected_index] = self._orig_item_snapshot.clone()
+                        self._recompose(notify=False)
+                        if self._on_before_modify is not None:
+                            self._on_before_modify()
+                        self._drag_undo_pushed = True
+                    resized = self._orig_item_snapshot.clone()
+                    if self._active_handle == "p_start":
+                        resized.start = cur_f
+                    elif self._active_handle == "p_end":
+                        resized.end = cur_f
+                    else:
+                        ob = self._orig_item_bounds
+                        left, top, right, bottom = ob.left(), ob.top(), ob.right(), ob.bottom()
+                        hname = self._active_handle
+                        if "w" in hname:
+                            left = min(right - 6.0, cur_f.x())
+                        if "e" in hname:
+                            right = max(left + 6.0, cur_f.x())
+                        if "n" in hname:
+                            top = min(bottom - 6.0, cur_f.y())
+                        if "s" in hname:
+                            bottom = max(top + 6.0, cur_f.y())
+                        resized.resize_from_snapshot(
+                            self._orig_item_snapshot,
+                            ob,
+                            QRectF(left, top, right - left, bottom - top),
+                        )
+                    self._items[self._selected_index] = resized
+                    self._recompose(notify=True)
+            event.accept()
+            return
+
         if event.buttons() & Qt.MouseButton.LeftButton:
             img_pt = self._widget_to_image_point(event.position().toPoint())
             if img_pt is not None:
-                if self._draw_mode and self._last_draw_pt is not None:
-                    self._draw_segment(self._last_draw_pt, img_pt)
+                if (
+                    self._interaction == "draw_path"
+                    and self.tool_mode in ("pen", "highlighter")
+                    and self._selected_index is not None
+                    and 0 <= self._selected_index < len(self._items)
+                ):
+                    if not self._stroke_points or self._stroke_points[-1] != img_pt:
+                        self._stroke_points.append(img_pt)
+                        self._items[self._selected_index].points.append(QPointF(img_pt))
+                        self._recompose(notify=True)
                     self._last_draw_pt = img_pt
-                elif not self._draw_mode and self._drag_origin_img is not None:
+                elif (
+                    self._interaction == "draw_shape"
+                    and self.tool_mode in ("line", "arrow", "rect", "ellipse")
+                    and self._drag_origin_img is not None
+                ):
+                    self._drag_current_img = img_pt
+                    self.update()
+                elif self._interaction == "marquee" and self._drag_origin_img is not None:
                     self._crop_rect = QRect(self._drag_origin_img, img_pt).normalized()
                     self.update()
                 event.accept()
                 return
+
+        # Hover cursor feedback when not dragging
+        if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            hname = self._hit_test_handle(event.position())
+            if hname is not None:
+                self.setCursor(self._handle_cursor(hname))
+            else:
+                img_pt_f = self._widget_to_image_float(event.position())
+                sel_item = self.get_selected_item()
+                if (
+                    img_pt_f is not None
+                    and (
+                        (
+                            sel_item is not None
+                            and sel_item.hit_test(img_pt_f, tolerance=self._img_hit_tolerance())
+                        )
+                        or (
+                            self.tool_mode == "select"
+                            and self._find_item_at_point(img_pt_f) is not None
+                        )
+                    )
+                ):
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                else:
+                    self.setCursor(self._default_tool_cursor())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self._panning and event.button() in (
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.MiddleButton,
+            Qt.MouseButton.RightButton,
+        ):
+            self._panning = False
+            self._pan_last_pos = None
+            self.setCursor(
+                Qt.CursorShape.OpenHandCursor
+                if (event.modifiers() & Qt.KeyboardModifier.AltModifier)
+                else self._default_tool_cursor()
+            )
+            event.accept()
+            return
+
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._interaction in ("move", "resize"):
+                self._interaction = None
+                self._active_handle = None
+                self._orig_item_snapshot = None
+                self._orig_item_bounds = None
+                self._move_origin_img = None
+                self._drag_undo_pushed = False
+                self.setCursor(self._default_tool_cursor())
+                event.accept()
+                return
+
             img_pt = self._widget_to_image_point(event.position().toPoint())
-            if self._draw_mode:
-                if self._last_draw_pt is not None and img_pt is not None:
-                    self._draw_segment(self._last_draw_pt, img_pt)
+            if self._interaction == "draw_path" and self.tool_mode in ("pen", "highlighter"):
+                if (
+                    img_pt is not None
+                    and self._selected_index is not None
+                    and 0 <= self._selected_index < len(self._items)
+                    and (not self._stroke_points or self._stroke_points[-1] != img_pt)
+                ):
+                    self._stroke_points.append(img_pt)
+                    self._items[self._selected_index].points.append(QPointF(img_pt))
+                    self._recompose(notify=True)
+                self._stroke_points = []
                 self._last_draw_pt = None
+            elif (
+                self._interaction == "draw_shape"
+                and self.tool_mode in ("line", "arrow", "rect", "ellipse")
+                and self._drag_origin_img is not None
+            ):
+                end_pt = img_pt or self._drag_current_img or self._drag_origin_img
+                if end_pt != self._drag_origin_img:
+                    if self._on_before_modify is not None:
+                        self._on_before_modify()
+                    if self.tool_mode in ("line", "arrow"):
+                        shape_item = _AnnotationItem(
+                            kind=self.tool_mode,
+                            color=self.pen_color,
+                            stroke_width=self.pen_width,
+                            start=QPointF(self._drag_origin_img),
+                            end=QPointF(end_pt),
+                        )
+                    else:
+                        shape_item = _AnnotationItem(
+                            kind=self.tool_mode,
+                            color=self.pen_color,
+                            stroke_width=self.pen_width,
+                            rect=QRectF(QRect(self._drag_origin_img, end_pt).normalized()),
+                        )
+                    self._drag_origin_img = None
+                    self._drag_current_img = None
+                    self._interaction = None
+                    self.add_item(shape_item, select=True)
+                    event.accept()
+                    return
+                self._drag_origin_img = None
+                self._drag_current_img = None
+                self.update()
+            elif self.tool_mode == "pixelate":
+                if self._drag_origin_img is not None and img_pt is not None:
+                    rect = QRect(self._drag_origin_img, img_pt).normalized()
+                    if rect.width() >= 4 and rect.height() >= 4:
+                        if _ImagePreviewCanvas._render_pixelated_on_image(self._image, rect) is not None:
+                            if self._on_before_modify is not None:
+                                self._on_before_modify()
+                            self._crop_rect = None
+                            self._drag_origin_img = None
+                            self._interaction = None
+                            self.add_item(
+                                _AnnotationItem(kind="pixelate", rect=QRectF(rect), block_size=10),
+                                select=True,
+                            )
+                            event.accept()
+                            return
+                self._crop_rect = None
+                self._drag_origin_img = None
+                self.update()
             else:
                 if self._drag_origin_img is not None and img_pt is not None:
                     rect = QRect(self._drag_origin_img, img_pt).normalized()
@@ -921,13 +1978,39 @@ class _ImagePreviewCanvas(QWidget):
                     )
                     self.update()
                 self._drag_origin_img = None
+            self._interaction = None
             event.accept()
             return
         super().mouseReleaseEvent(event)
 
 
 class ImageEditDialog(QDialog):
-    """Modal editor to resize, rotate, flip, crop, filter, annotate, or delete an image."""
+    """Full-screen studio editor with top-bar emoji controls, undo/redo, highlighter, shapes, text, and filters."""
+
+    MAX_UNDO_STEPS = 40
+    MAX_DISPLAY_DIM = 3840
+    COLOR_PRESETS = (
+        ("🔴", "#F38BA8", "Sunset Coral Red"),
+        ("🟠", "#FAB387", "Sunset Peach"),
+        ("🟡", "#F9E2AF", "Highlighter Yellow"),
+        ("🟢", "#A6E3A1", "Mint Green"),
+        ("🔵", "#89B4FA", "Sky Blue"),
+        ("🟣", "#CBA6F7", "Lavender Purple"),
+        ("⚪", "#FFFFFF", "White"),
+    )
+    TOOL_HINTS = {
+        "select": "🖱️ Select: Click & drag items to move or resize with handles (Alt+Drag to pan)",
+        "crop": "✂️ Crop: Drag area then click ✂️ (Alt+Drag to pan)",
+        "pen": "🖊️ Pen: Drag to draw; drag handles to resize (Alt+Drag to pan)",
+        "highlighter": "🖍️ Highlighter: Drag to highlight; drag handles to resize",
+        "line": "📏 Line: Drag line; drag endpoints to adjust",
+        "arrow": "➡️ Arrow: Drag arrow; drag endpoints to adjust",
+        "rect": "🔲 Rectangle: Drag box; use handles to move/resize",
+        "ellipse": "⭕ Ellipse: Drag circle/oval; use handles to move/resize",
+        "text": "🔤 Text: Click image to place text or click 📝 button",
+        "pixelate": "🫧 Pixelate: Drag area to redact; use handles to adjust",
+        "eyedropper": "💧 Eyedropper: Click image to sample a color",
+    }
 
     def __init__(
         self,
@@ -939,13 +2022,22 @@ class ImageEditDialog(QDialog):
         super().__init__(parent)
         self._original_image = image.convertToFormat(QImage.Format.Format_ARGB32)
         self._working_image = self._original_image.copy()
-        self._orig_w = max(16, min(2400, int(initial_width or image.width() or 16)))
-        self._orig_h = max(16, min(2400, int(initial_height or image.height() or 16)))
+        self._orig_w = max(16, min(self.MAX_DISPLAY_DIM, int(initial_width or image.width() or 16)))
+        self._orig_h = max(16, min(self.MAX_DISPLAY_DIM, int(initial_height or image.height() or 16)))
         self._aspect_ratio = self._orig_w / max(1, self._orig_h)
         self.delete_requested = False
         self._updating_spins = False
+        self._syncing_item_controls = False
+        self._user_picked_color = False
+        self._initial_fullscreen_applied = False
+        self._undo_stack: List[
+            Tuple[QImage, List[_AnnotationItem], Optional[int], int, int, float]
+        ] = []
+        self._redo_stack: List[
+            Tuple[QImage, List[_AnnotationItem], Optional[int], int, int, float]
+        ] = []
 
-        self.setWindowTitle("Edit & Resize Image")
+        self.setWindowTitle("✨ Full Screen Image Editor")
         self.setWindowFlags(
             self.windowFlags()
             | Qt.WindowType.WindowStaysOnTopHint
@@ -953,11 +2045,19 @@ class ImageEditDialog(QDialog):
             | Qt.WindowType.WindowMinimizeButtonHint
         )
         self.setModal(True)
-        self.setMinimumWidth(380)
+        self.setMinimumSize(640, 420)
+        self.resize(960, 640)
+        self.setWindowState(
+            self.windowState()
+            | Qt.WindowState.WindowFullScreen
+            | Qt.WindowState.WindowMaximized
+        )
 
         self._setup_styles()
         self._build_ui()
+        self._setup_shortcuts()
         self._update_info_label()
+        self._update_undo_redo_buttons()
 
     def _setup_styles(self) -> None:
         self.setStyleSheet(
@@ -965,10 +2065,10 @@ class ImageEditDialog(QDialog):
             QDialog {
                 background-color: qlineargradient(
                     x1:0, y1:0, x2:0.4, y2:1,
-                    stop:0 #1E1E2E, stop:0.6 #282039, stop:1 #34233E
+                    stop:0 #181624, stop:0.6 #241D35, stop:1 #30213B
                 );
                 color: #CDD6F4;
-                font-family: 'Segoe UI', sans-serif;
+                font-family: 'Segoe UI Emoji', 'Segoe UI', sans-serif;
             }
             QLabel {
                 color: #CDD6F4;
@@ -979,16 +2079,21 @@ class ImageEditDialog(QDialog):
                 font-size: 11px;
                 font-weight: 600;
             }
+            QLabel#ImageToolHint {
+                color: #F9E2AF;
+                font-size: 11px;
+                font-weight: 600;
+            }
             QSpinBox {
                 background-color: qlineargradient(
                     x1:0, y1:0, x2:1, y2:1,
                     stop:0 #2A2D3E, stop:1 #342945
                 );
-                border: 1px solid #363A4F;
+                border: 1px solid #45475A;
                 border-radius: 5px;
-                padding: 3px 6px;
+                padding: 2px 5px;
                 color: #CDD6F4;
-                font-size: 12px;
+                font-size: 11px;
             }
             QSpinBox:focus {
                 border-color: #FAB387;
@@ -996,226 +2101,690 @@ class ImageEditDialog(QDialog):
             QCheckBox {
                 color: #CDD6F4;
                 font-size: 12px;
-                spacing: 6px;
+                spacing: 4px;
+            }
+            QWidget#ImageDialogTopBar {
+                background-color: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #242136, stop:0.5 #2F2640, stop:1 #3B2846
+                );
+                border: 1px solid #45475A;
+                border-radius: 8px;
             }
             QPushButton {
                 background-color: qlineargradient(
                     x1:0, y1:0, x2:1, y2:1,
                     stop:0 #2A2D3E, stop:1 #342945
                 );
-                border: 1px solid #363A4F;
-                border-radius: 5px;
+                border: 1px solid #45475A;
+                border-radius: 6px;
                 color: #CDD6F4;
-                padding: 4px 8px;
-                font-size: 11px;
+                padding: 3px 7px;
+                font-size: 13px;
                 font-weight: 600;
+                min-height: 24px;
             }
             QPushButton:hover {
-                background-color: #363A4F;
+                background-color: #3B3654;
                 border-color: #FAB387;
+            }
+            QPushButton:disabled {
+                color: #585B70;
+                border-color: #2A2D3E;
             }
             QPushButton:checked {
                 background-color: qlineargradient(
                     x1:0, y1:0, x2:1, y2:1,
                     stop:0 #F9E2AF, stop:0.5 #FAB387, stop:1 #F38BA8
                 );
-                border-color: #CBA6F7;
+                border-color: #F9E2AF;
+                color: #1E1E2E;
+            }
+            QPushButton#ApplyEmojiBtn {
+                background-color: #2A3D34;
+                border-color: #A6E3A1;
+            }
+            QPushButton#ApplyEmojiBtn:hover {
+                background-color: #A6E3A1;
                 color: #1E1E2E;
             }
             QPushButton#DangerBtn {
                 color: #F38BA8;
-                border-color: #513544;
+                border-color: #6B3C4E;
             }
             QPushButton#DangerBtn:hover {
                 background-color: #F38BA8;
                 border-color: #F38BA8;
                 color: #1E1E2E;
             }
-            QWidget#ImageDialogTopBar {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:1 #362947
-                );
-                border: 1px solid #363A4F;
-                border-radius: 6px;
-            }
-            QLabel#ImageDialogTitle {
-                color: #F9E2AF;
+            QPushButton#ColorDotBtn {
+                padding: 2px 4px;
+                min-width: 24px;
                 font-size: 12px;
-                font-weight: 700;
             }
             """
         )
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
+        root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
-
-        self.top_bar = QWidget(self)
-        self.top_bar.setObjectName("ImageDialogTopBar")
-        self.top_bar.setFixedHeight(32)
-        self.top_bar.installEventFilter(self)
-        top_bar_layout = QHBoxLayout(self.top_bar)
-        top_bar_layout.setContentsMargins(10, 4, 6, 4)
-        top_bar_layout.setSpacing(6)
-
-        self.lbl_title = QLabel("Edit & Resize Image")
-        self.lbl_title.setObjectName("ImageDialogTitle")
-        top_bar_layout.addWidget(self.lbl_title)
-        top_bar_layout.addStretch(1)
-
-        self.btn_fullscreen = QPushButton("⛶")
-        self.btn_fullscreen.setFixedSize(24, 22)
-        self.btn_fullscreen.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_fullscreen.setToolTip("Toggle Full Screen (Double-click top bar)")
-        self.btn_fullscreen.clicked.connect(self.toggle_fullscreen)
-        top_bar_layout.addWidget(self.btn_fullscreen)
-        root.addWidget(self.top_bar)
 
         self.canvas = _ImagePreviewCanvas(
             self._working_image,
             on_image_modified=self._on_canvas_modified,
+            on_before_modify=self._push_undo_state,
+            on_text_requested=self._on_canvas_text_requested,
+            on_color_sampled=self._on_color_sampled,
+            on_zoom_changed=self._on_zoom_changed,
+            on_selection_changed=self._on_canvas_selection_changed,
+            on_edit_text_item=self._on_edit_text_item,
             parent=self,
         )
-        root.addWidget(self.canvas, 1)
 
-        info_row = QHBoxLayout()
-        self.lbl_info = QLabel()
-        self.lbl_info.setObjectName("ImageMetaLabel")
-        info_row.addWidget(self.lbl_info)
-        info_row.addStretch(1)
-        hint = QLabel("Drag preview to select crop area")
-        hint.setObjectName("ImageMetaLabel")
-        info_row.addWidget(hint)
-        root.addLayout(info_row)
+        # All action/tool buttons live in self.top_bar using emojis
+        self.top_bar = QWidget(self)
+        self.top_bar.setObjectName("ImageDialogTopBar")
+        self.top_bar.installEventFilter(self)
+        top_vbox = QVBoxLayout(self.top_bar)
+        top_vbox.setContentsMargins(8, 6, 8, 6)
+        top_vbox.setSpacing(6)
 
-        # Resize controls
-        size_row = QHBoxLayout()
-        size_row.setSpacing(6)
-        size_row.addWidget(QLabel("W:"))
+        # Row 1: Undo/Redo, Tools (Crop, Pen, Highlighter, Shapes, Text, Pixelate, Eyedropper) + Session Actions
+        row1 = QHBoxLayout()
+        row1.setSpacing(4)
+
+        self.btn_undo = QPushButton("↩️")
+        self.btn_undo.setToolTip("Undo (Ctrl+Z)")
+        self.btn_undo.clicked.connect(self.undo)
+        row1.addWidget(self.btn_undo)
+
+        self.btn_redo = QPushButton("↪️")
+        self.btn_redo.setToolTip("Redo (Ctrl+Y / Ctrl+Shift+Z)")
+        self.btn_redo.clicked.connect(self.redo)
+        row1.addWidget(self.btn_redo)
+
+        self.btn_reset = QPushButton("♻️")
+        self.btn_reset.setToolTip("Reset Image to Original")
+        self.btn_reset.clicked.connect(self.reset_image)
+        row1.addWidget(self.btn_reset)
+
+        self._tool_group = QButtonGroup(self)
+        self._tool_group.setExclusive(True)
+        self._tool_buttons: Dict[str, QPushButton] = {}
+
+        def _make_tool_btn(
+            emoji: str, mode: str, tooltip: str, checked: bool = False
+        ) -> QPushButton:
+            btn = QPushButton(emoji)
+            btn.setCheckable(True)
+            btn.setChecked(checked)
+            btn.setToolTip(tooltip)
+            self._tool_group.addButton(btn)
+            self._tool_buttons[mode] = btn
+            return btn
+
+        self.btn_tool_select = _make_tool_btn(
+            "🖱️", "select", "Select, Move & Resize Drawn Items (Delete removes item)"
+        )
+        self.btn_tool_select.clicked.connect(lambda: self.select_tool("select"))
+        row1.addWidget(self.btn_tool_select)
+
+        self.btn_tool_crop = _make_tool_btn(
+            "✂️", "crop", "Crop Tool (Drag area on canvas, click again to crop)", checked=True
+        )
+        self.btn_crop = self.btn_tool_crop
+        self.btn_tool_crop.clicked.connect(self._on_crop_clicked)
+        row1.addWidget(self.btn_tool_crop)
+
+        self.btn_draw = _make_tool_btn("🖊️", "pen", "Freehand Pen Tool")
+        self.btn_draw.clicked.connect(lambda: self.select_tool("pen"))
+        row1.addWidget(self.btn_draw)
+
+        self.btn_highlighter = _make_tool_btn(
+            "🖍️", "highlighter", "Highlighter Marker Tool"
+        )
+        self.btn_highlighter.clicked.connect(lambda: self.select_tool("highlighter"))
+        row1.addWidget(self.btn_highlighter)
+
+        self.btn_tool_line = _make_tool_btn("📏", "line", "Straight Line Tool")
+        self.btn_tool_line.clicked.connect(lambda: self.select_tool("line"))
+        row1.addWidget(self.btn_tool_line)
+
+        self.btn_tool_arrow = _make_tool_btn("➡️", "arrow", "Arrow Annotation Tool")
+        self.btn_tool_arrow.clicked.connect(lambda: self.select_tool("arrow"))
+        row1.addWidget(self.btn_tool_arrow)
+
+        self.btn_tool_rect = _make_tool_btn("🔲", "rect", "Rectangle Outline Tool")
+        self.btn_tool_rect.clicked.connect(lambda: self.select_tool("rect"))
+        row1.addWidget(self.btn_tool_rect)
+
+        self.btn_tool_ellipse = _make_tool_btn("⭕", "ellipse", "Circle / Ellipse Tool")
+        self.btn_tool_ellipse.clicked.connect(lambda: self.select_tool("ellipse"))
+        row1.addWidget(self.btn_tool_ellipse)
+
+        self.btn_tool_text = _make_tool_btn("🔤", "text", "Text Tool (Click image to place)")
+        self.btn_tool_text.clicked.connect(lambda: self.select_tool("text"))
+        row1.addWidget(self.btn_tool_text)
+
+        self.btn_add_text = QPushButton("📝")
+        self.btn_add_text.setToolTip("Add Text Box to Image (Movable & Resizable)")
+        self.btn_add_text.clicked.connect(lambda: self.prompt_and_add_text())
+        row1.addWidget(self.btn_add_text)
+
+        self.btn_tool_pixelate = _make_tool_btn(
+            "🫧", "pixelate", "Pixelate / Redact Area Tool (Drag box)"
+        )
+        self.btn_tool_pixelate.clicked.connect(lambda: self.select_tool("pixelate"))
+        row1.addWidget(self.btn_tool_pixelate)
+
+        self.btn_tool_eyedropper = _make_tool_btn(
+            "💧", "eyedropper", "Eyedropper Color Picker (Click image)"
+        )
+        self.btn_tool_eyedropper.clicked.connect(lambda: self.select_tool("eyedropper"))
+        row1.addWidget(self.btn_tool_eyedropper)
+
+        row1.addStretch(1)
+
+        self.btn_copy_image = QPushButton("📋")
+        self.btn_copy_image.setToolTip("Copy Edited Image to Clipboard (Ctrl+C)")
+        self.btn_copy_image.clicked.connect(self.copy_image_to_clipboard)
+        row1.addWidget(self.btn_copy_image)
+
+        self.btn_export_image = QPushButton("💾")
+        self.btn_export_image.setToolTip("Save Edited Image to File...")
+        self.btn_export_image.clicked.connect(lambda: self.export_image_to_file())
+        row1.addWidget(self.btn_export_image)
+
+        self.btn_replace = QPushButton("📂")
+        self.btn_replace.setToolTip("Replace Image from File...")
+        self.btn_replace.clicked.connect(lambda: self.replace_image())
+        row1.addWidget(self.btn_replace)
+
+        self.btn_delete = QPushButton("🗑️")
+        self.btn_delete.setObjectName("DangerBtn")
+        self.btn_delete.setToolTip("Delete Image from Note")
+        self.btn_delete.clicked.connect(self._on_delete_clicked)
+        row1.addWidget(self.btn_delete)
+
+        self.btn_fullscreen = QPushButton("🖥️")
+        self.btn_fullscreen.setToolTip("Toggle Full Screen / Windowed (F11 / Double-click bar)")
+        self.btn_fullscreen.clicked.connect(self.toggle_fullscreen)
+        row1.addWidget(self.btn_fullscreen)
+
+        self.btn_apply = QPushButton("✅")
+        self.btn_apply.setObjectName("ApplyEmojiBtn")
+        self.btn_apply.setToolTip("Save & Apply Changes (Ctrl+S)")
+        self.btn_apply.clicked.connect(self.accept)
+        row1.addWidget(self.btn_apply)
+
+        self.btn_cancel = QPushButton("❌")
+        self.btn_cancel.setToolTip("Cancel Changes (Esc)")
+        self.btn_cancel.clicked.connect(self.reject)
+        row1.addWidget(self.btn_cancel)
+
+        top_vbox.addLayout(row1)
+
+        # Row 2: Color Swatches, Stroke Width, Transforms, Filters, Size & Presets, Zoom & Status
+        row2 = QHBoxLayout()
+        row2.setSpacing(4)
+
+        self.btn_draw_color = QPushButton("🎨")
+        self.btn_draw_color.setToolTip("Pick Custom Color")
+        self.btn_draw_color.clicked.connect(self._pick_draw_color)
+        row2.addWidget(self.btn_draw_color)
+
+        self.color_preset_buttons: List[QPushButton] = []
+        for emoji, hex_color, tip in self.COLOR_PRESETS:
+            cbtn = QPushButton(emoji)
+            cbtn.setObjectName("ColorDotBtn")
+            cbtn.setToolTip(f"{tip} ({hex_color})")
+            cbtn.clicked.connect(
+                lambda _chk=False, col=hex_color: self._apply_preset_color(col)
+            )
+            row2.addWidget(cbtn)
+            self.color_preset_buttons.append(cbtn)
+
+        self.spin_pen_width = QSpinBox()
+        self.spin_pen_width.setRange(1, 80)
+        self.spin_pen_width.setValue(3)
+        self.spin_pen_width.setPrefix("🖌️ ")
+        self.spin_pen_width.setSuffix("px")
+        self.spin_pen_width.setToolTip("Stroke Size (px)")
+        self.spin_pen_width.valueChanged.connect(self._on_pen_width_changed)
+        row2.addWidget(self.spin_pen_width)
+
+        self.btn_rotate_left = QPushButton("🔄")
+        self.btn_rotate_left.setToolTip("Rotate 90° Counter-Clockwise")
+        self.btn_rotate_left.clicked.connect(lambda: self.rotate_image(-90))
+        row2.addWidget(self.btn_rotate_left)
+
+        self.btn_rotate_right = QPushButton("🔃")
+        self.btn_rotate_right.setToolTip("Rotate 90° Clockwise")
+        self.btn_rotate_right.clicked.connect(lambda: self.rotate_image(90))
+        row2.addWidget(self.btn_rotate_right)
+
+        self.btn_flip_h = QPushButton("↔️")
+        self.btn_flip_h.setToolTip("Flip Horizontal")
+        self.btn_flip_h.clicked.connect(lambda: self.flip_image(horizontal=True))
+        row2.addWidget(self.btn_flip_h)
+
+        self.btn_flip_v = QPushButton("↕️")
+        self.btn_flip_v.setToolTip("Flip Vertical")
+        self.btn_flip_v.clicked.connect(lambda: self.flip_image(horizontal=False))
+        row2.addWidget(self.btn_flip_v)
+
+        self.btn_grayscale = QPushButton("🌗")
+        self.btn_grayscale.setToolTip("Convert to Grayscale")
+        self.btn_grayscale.clicked.connect(self.apply_grayscale)
+        row2.addWidget(self.btn_grayscale)
+
+        self.btn_invert = QPushButton("☯️")
+        self.btn_invert.setToolTip("Invert Colors")
+        self.btn_invert.clicked.connect(self.apply_invert)
+        row2.addWidget(self.btn_invert)
+
+        self.btn_brightness = QPushButton("☀️")
+        self.btn_brightness.setToolTip("Brighten & Enhance Contrast")
+        self.btn_brightness.clicked.connect(lambda: self.apply_brightness_boost(20))
+        row2.addWidget(self.btn_brightness)
+
+        row2.addWidget(QLabel("📐"))
         self.spin_width = QSpinBox()
-        self.spin_width.setRange(16, 2400)
-        self.spin_width.setSuffix(" px")
+        self.spin_width.setRange(16, self.MAX_DISPLAY_DIM)
+        self.spin_width.setSuffix("px")
         self.spin_width.setValue(self._orig_w)
         self.spin_width.valueChanged.connect(self._on_width_changed)
-        size_row.addWidget(self.spin_width)
+        row2.addWidget(self.spin_width)
 
-        size_row.addWidget(QLabel("H:"))
         self.spin_height = QSpinBox()
-        self.spin_height.setRange(16, 2400)
-        self.spin_height.setSuffix(" px")
+        self.spin_height.setRange(16, self.MAX_DISPLAY_DIM)
+        self.spin_height.setSuffix("px")
         self.spin_height.setValue(self._orig_h)
         self.spin_height.valueChanged.connect(self._on_height_changed)
-        size_row.addWidget(self.spin_height)
+        row2.addWidget(self.spin_height)
 
-        self.chk_aspect = QCheckBox("Lock aspect ratio")
+        self.chk_aspect = QCheckBox("🔒")
+        self.chk_aspect.setToolTip("Lock Aspect Ratio")
         self.chk_aspect.setChecked(True)
         self.chk_aspect.toggled.connect(self._on_aspect_toggled)
-        size_row.addWidget(self.chk_aspect)
-        size_row.addStretch(1)
-        root.addLayout(size_row)
+        row2.addWidget(self.chk_aspect)
 
-        # Size presets row
-        preset_row = QHBoxLayout()
-        preset_row.setSpacing(6)
-        self.btn_scale_50 = QPushButton("50%")
+        self.btn_scale_50 = QPushButton("🔹50%")
+        self.btn_scale_50.setToolTip("Scale to 50%")
         self.btn_scale_50.clicked.connect(lambda: self.apply_scale_preset(0.5))
-        preset_row.addWidget(self.btn_scale_50)
+        row2.addWidget(self.btn_scale_50)
 
-        self.btn_scale_75 = QPushButton("75%")
+        self.btn_scale_75 = QPushButton("🔸75%")
+        self.btn_scale_75.setToolTip("Scale to 75%")
         self.btn_scale_75.clicked.connect(lambda: self.apply_scale_preset(0.75))
-        preset_row.addWidget(self.btn_scale_75)
+        row2.addWidget(self.btn_scale_75)
 
-        self.btn_scale_100 = QPushButton("100%")
+        self.btn_scale_100 = QPushButton("💯")
+        self.btn_scale_100.setToolTip("Scale to 100% Source Size")
         self.btn_scale_100.clicked.connect(lambda: self.apply_scale_preset(1.0))
-        preset_row.addWidget(self.btn_scale_100)
+        row2.addWidget(self.btn_scale_100)
 
-        self.btn_fit_sidebar = QPushButton("Fit (280px)")
+        self.btn_fit_sidebar = QPushButton("📱280")
+        self.btn_fit_sidebar.setToolTip("Fit to Sidebar Width (280px)")
         self.btn_fit_sidebar.clicked.connect(lambda: self.fit_to_width(280))
-        preset_row.addWidget(self.btn_fit_sidebar)
-        preset_row.addStretch(1)
-        root.addLayout(preset_row)
+        row2.addWidget(self.btn_fit_sidebar)
 
-        # Transform & Crop row
-        transform_row = QHBoxLayout()
-        transform_row.setSpacing(6)
-        self.btn_rotate_left = QPushButton("⟲ 90°")
-        self.btn_rotate_left.clicked.connect(lambda: self.rotate_image(-90))
-        transform_row.addWidget(self.btn_rotate_left)
+        self.btn_zoom_out = QPushButton("🔍➖")
+        self.btn_zoom_out.setToolTip("Zoom Out (Mouse Wheel Down)")
+        self.btn_zoom_out.clicked.connect(self.canvas.zoom_out)
+        row2.addWidget(self.btn_zoom_out)
 
-        self.btn_rotate_right = QPushButton("⟳ 90°")
-        self.btn_rotate_right.clicked.connect(lambda: self.rotate_image(90))
-        transform_row.addWidget(self.btn_rotate_right)
+        self.btn_zoom_reset = QPushButton("🎯")
+        self.btn_zoom_reset.setToolTip("Reset Zoom & Pan to 100%")
+        self.btn_zoom_reset.clicked.connect(self.canvas.reset_zoom)
+        row2.addWidget(self.btn_zoom_reset)
 
-        self.btn_flip_h = QPushButton("Flip H")
-        self.btn_flip_h.clicked.connect(lambda: self.flip_image(horizontal=True))
-        transform_row.addWidget(self.btn_flip_h)
+        self.btn_zoom_in = QPushButton("🔍➕")
+        self.btn_zoom_in.setToolTip("Zoom In (Mouse Wheel Up)")
+        self.btn_zoom_in.clicked.connect(self.canvas.zoom_in)
+        row2.addWidget(self.btn_zoom_in)
 
-        self.btn_flip_v = QPushButton("Flip V")
-        self.btn_flip_v.clicked.connect(lambda: self.flip_image(horizontal=False))
-        transform_row.addWidget(self.btn_flip_v)
+        row2.addStretch(1)
 
-        self.btn_crop = QPushButton("Crop")
-        self.btn_crop.clicked.connect(self.crop_to_selection)
-        transform_row.addWidget(self.btn_crop)
-        transform_row.addStretch(1)
-        root.addLayout(transform_row)
+        self.lbl_tool_hint = QLabel(self.TOOL_HINTS["crop"])
+        self.lbl_tool_hint.setObjectName("ImageToolHint")
+        row2.addWidget(self.lbl_tool_hint)
 
-        # Filters, Annotate, Replace & Reset row
-        tools_row = QHBoxLayout()
-        tools_row.setSpacing(6)
-        self.btn_grayscale = QPushButton("Grayscale")
-        self.btn_grayscale.clicked.connect(self.apply_grayscale)
-        tools_row.addWidget(self.btn_grayscale)
+        self.lbl_info = QLabel()
+        self.lbl_info.setObjectName("ImageMetaLabel")
+        row2.addWidget(self.lbl_info)
 
-        self.btn_invert = QPushButton("Invert")
-        self.btn_invert.clicked.connect(self.apply_invert)
-        tools_row.addWidget(self.btn_invert)
+        top_vbox.addLayout(row2)
 
-        self.btn_draw = QPushButton("Draw")
-        self.btn_draw.setCheckable(True)
-        self.btn_draw.toggled.connect(self.canvas.set_draw_mode)
-        tools_row.addWidget(self.btn_draw)
+        root.addWidget(self.top_bar)
+        root.addWidget(self.canvas, 1)
 
-        self.btn_draw_color = QPushButton("Color")
-        self.btn_draw_color.clicked.connect(self._pick_draw_color)
-        tools_row.addWidget(self.btn_draw_color)
-
-        self.btn_replace = QPushButton("Replace...")
-        self.btn_replace.clicked.connect(lambda: self.replace_image())
-        tools_row.addWidget(self.btn_replace)
-
-        self.btn_reset = QPushButton("Reset")
-        self.btn_reset.clicked.connect(self.reset_image)
-        tools_row.addWidget(self.btn_reset)
-        tools_row.addStretch(1)
-        root.addLayout(tools_row)
-
-        # Footer: Delete + OK/Cancel
-        footer_row = QHBoxLayout()
-        self.btn_delete = QPushButton("Delete Image")
-        self.btn_delete.setObjectName("DangerBtn")
-        self.btn_delete.clicked.connect(self._on_delete_clicked)
-        footer_row.addWidget(self.btn_delete)
-        footer_row.addStretch(1)
-
+        # Hidden standard dialog button box kept for API compatibility
         self.button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            self,
         )
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
-        footer_row.addWidget(self.button_box)
-        root.addLayout(footer_row)
+        self.button_box.hide()
+
+    def _setup_shortcuts(self) -> None:
+        self._sc_undo = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self._sc_undo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._sc_undo.activated.connect(self.undo)
+
+        self._sc_redo = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self._sc_redo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._sc_redo.activated.connect(self.redo)
+
+        self._sc_redo_alt = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
+        self._sc_redo_alt.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._sc_redo_alt.activated.connect(self.redo)
+
+        self._sc_copy = QShortcut(QKeySequence("Ctrl+C"), self)
+        self._sc_copy.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._sc_copy.activated.connect(self.copy_image_to_clipboard)
+
+        self._sc_save = QShortcut(QKeySequence("Ctrl+S"), self)
+        self._sc_save.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._sc_save.activated.connect(self.accept)
+
+        self._sc_fullscreen = QShortcut(QKeySequence("F11"), self)
+        self._sc_fullscreen.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._sc_fullscreen.activated.connect(self.toggle_fullscreen)
+
+    def _push_undo_state(self) -> None:
+        base_img, items, sel_idx = self.canvas.get_state_snapshot()
+        self._working_image = self.canvas.get_image().copy()
+        snapshot = (
+            base_img,
+            items,
+            sel_idx,
+            int(self.spin_width.value()),
+            int(self.spin_height.value()),
+            float(self._aspect_ratio),
+        )
+        self._undo_stack.append(snapshot)
+        if len(self._undo_stack) > self.MAX_UNDO_STEPS:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+        self._update_undo_redo_buttons()
+
+    def _update_undo_redo_buttons(self) -> None:
+        self.btn_undo.setEnabled(bool(self._undo_stack))
+        self.btn_redo.setEnabled(bool(self._redo_stack))
+
+    def undo(self) -> bool:
+        """Restores the previous editing state (Ctrl+Z)."""
+        if not self._undo_stack:
+            return False
+        cur_base, cur_items, cur_sel = self.canvas.get_state_snapshot()
+        cur_snapshot = (
+            cur_base,
+            cur_items,
+            cur_sel,
+            int(self.spin_width.value()),
+            int(self.spin_height.value()),
+            float(self._aspect_ratio),
+        )
+        self._redo_stack.append(cur_snapshot)
+        prev_base, prev_items, prev_sel, prev_w, prev_h, prev_ratio = self._undo_stack.pop()
+        self._aspect_ratio = prev_ratio
+        self.canvas.restore_state_snapshot(prev_base, prev_items, prev_sel)
+        self._working_image = self.canvas.get_image().copy()
+        self.set_target_size(prev_w, prev_h)
+        self._update_undo_redo_buttons()
+        self.lbl_tool_hint.setText("↩️ Undid last change")
+        return True
+
+    def redo(self) -> bool:
+        """Reapplies an undone editing state (Ctrl+Y)."""
+        if not self._redo_stack:
+            return False
+        cur_base, cur_items, cur_sel = self.canvas.get_state_snapshot()
+        cur_snapshot = (
+            cur_base,
+            cur_items,
+            cur_sel,
+            int(self.spin_width.value()),
+            int(self.spin_height.value()),
+            float(self._aspect_ratio),
+        )
+        self._undo_stack.append(cur_snapshot)
+        next_base, next_items, next_sel, next_w, next_h, next_ratio = self._redo_stack.pop()
+        self._aspect_ratio = next_ratio
+        self.canvas.restore_state_snapshot(next_base, next_items, next_sel)
+        self._working_image = self.canvas.get_image().copy()
+        self.set_target_size(next_w, next_h)
+        self._update_undo_redo_buttons()
+        self.lbl_tool_hint.setText("↪️ Redid change")
+        return True
+
+    def delete_selected_item(self) -> bool:
+        if self.canvas.get_selected_item() is None:
+            return False
+        self._push_undo_state()
+        ok = self.canvas.delete_selected_item()
+        if ok:
+            self.lbl_tool_hint.setText("🗑️ Removed selected item")
+        return ok
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            focus_w = QApplication.focusWidget()
+            if not isinstance(focus_w, (QSpinBox, QLineEdit)) and self.delete_selected_item():
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def select_tool(self, mode: str) -> None:
+        norm = str(mode or "crop").lower().strip()
+        if norm != "select":
+            self.canvas.select_item(None)
+        if (
+            norm == "highlighter"
+            and not self._user_picked_color
+            and self.canvas.pen_color.name().lower() == "#f38ba8"
+        ):
+            self.canvas.set_pen_color(QColor("#F9E2AF"))
+        self.canvas.set_tool_mode(norm)
+        btn = self._tool_buttons.get(self.canvas.tool_mode)
+        if btn is not None and not btn.isChecked():
+            btn.setChecked(True)
+        self.lbl_tool_hint.setText(self.TOOL_HINTS.get(self.canvas.tool_mode, ""))
+
+    def _on_crop_clicked(self) -> None:
+        if self.canvas.get_crop_rect() is not None:
+            self.crop_to_selection()
+        else:
+            self.select_tool("crop")
 
     def _on_canvas_modified(self) -> None:
+        self._working_image = self.canvas.get_image()
         self._update_info_label()
+
+    def _on_canvas_selection_changed(self, idx: Optional[int]) -> None:
+        item = self.canvas.get_selected_item()
+        if item is not None:
+            self._syncing_item_controls = True
+            try:
+                if item.kind not in ("pixelate", "text"):
+                    self.spin_pen_width.setValue(
+                        max(1, min(80, int(item.stroke_width)))
+                    )
+            finally:
+                self._syncing_item_controls = False
+            kind_label = item.kind.capitalize()
+            extra = " • Double-click to edit" if item.kind == "text" else ""
+            self.lbl_tool_hint.setText(
+                f"🖐️ Selected {kind_label}: drag to move, drag handles to resize{extra}"
+            )
+        else:
+            self.lbl_tool_hint.setText(self.TOOL_HINTS.get(self.canvas.tool_mode, ""))
+
+    def _on_pen_width_changed(self, width: int) -> None:
+        self.canvas.set_pen_width(width)
+        if self._syncing_item_controls:
+            return
+        sel = self.canvas.get_selected_item()
+        if sel is not None and sel.kind not in ("pixelate",):
+            self._push_undo_state()
+            item_ref = self.canvas.get_selected_item()
+            if item_ref is not None:
+                if item_ref.kind == "text":
+                    item_ref.font_px = max(12, int(width) * 5)
+                    font = QFont("Segoe UI", -1, QFont.Weight.Bold)
+                    font.setPixelSize(item_ref.font_px)
+                    metrics = QFontMetrics(font)
+                    item_ref.rect = QRectF(
+                        item_ref.rect.left(),
+                        item_ref.rect.top(),
+                        max(24.0, float(metrics.horizontalAdvance(item_ref.text) + 8)),
+                        max(16.0, float(metrics.height() + 4)),
+                    )
+                else:
+                    item_ref.stroke_width = max(1, int(width))
+                self.canvas._recompose(notify=True)
+
+    def _on_zoom_changed(self, _factor: float) -> None:
+        self._update_info_label()
+
+    def _on_color_sampled(self, color: QColor) -> None:
+        if color.isValid():
+            self._user_picked_color = True
+            self.lbl_tool_hint.setText(f"💧 Sampled {color.name().upper()}")
+            self.select_tool("pen")
+
+    def _prompt_for_text(
+        self, title: str, label: str, initial_text: str = ""
+    ) -> Optional[str]:
+        dlg = QInputDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setLabelText(label)
+        dlg.setTextValue(initial_text)
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        dlg.setStyleSheet(self.styleSheet())
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            return dlg.textValue()
+        return None
+
+    def prompt_and_add_text(self, text: Optional[str] = None) -> bool:
+        """Prompts for text via dialog (or uses text directly) and places a movable/resizable text box."""
+        chosen = (
+            text
+            if text is not None
+            else self._prompt_for_text("📝 Add Text", "Enter text to add:")
+        )
+        if chosen and chosen.strip():
+            return self.add_text_annotation(
+                self.canvas.get_visible_image_center(),
+                chosen,
+                center_on_point=True,
+            )
+        return False
+
+    def _on_edit_text_item(self, idx: int) -> bool:
+        if not (0 <= idx < len(self.canvas._items)):
+            return False
+        target = self.canvas._items[idx]
+        if target.kind != "text":
+            return False
+        updated = self._prompt_for_text(
+            "🔤 Edit Text", "Update text:", initial_text=target.text
+        )
+        if updated is not None and updated.strip() and updated.strip() != target.text:
+            clean = updated.strip()
+            self._push_undo_state()
+            item_ref = self.canvas._items[idx]
+            item_ref.text = clean
+            font = QFont("Segoe UI", -1, QFont.Weight.Bold)
+            font.setPixelSize(item_ref.font_px)
+            metrics = QFontMetrics(font)
+            item_ref.rect = QRectF(
+                item_ref.rect.left(),
+                item_ref.rect.top(),
+                max(24.0, float(metrics.horizontalAdvance(clean) + 8)),
+                max(item_ref.rect.height(), float(metrics.height() + 4)),
+            )
+            self.canvas._recompose(notify=True)
+            self.lbl_tool_hint.setText(f'🔤 Updated text "{clean[:24]}"')
+            return True
+        return False
+
+    def _on_canvas_text_requested(self, img_pt: QPoint) -> None:
+        text = self._prompt_for_text(
+            "🔤 Add Text Annotation", "Enter text to place on image:"
+        )
+        if text and text.strip():
+            self.add_text_annotation(img_pt, text)
+
+    def add_text_annotation(
+        self,
+        img_pt: QPoint,
+        text: str,
+        color: Optional[QColor] = None,
+        font_px: Optional[int] = None,
+        center_on_point: bool = False,
+    ) -> bool:
+        clean = str(text or "").strip()
+        if not clean or self._working_image.isNull():
+            return False
+        self._push_undo_state()
+        draw_color = QColor(color or self.canvas.pen_color)
+        draw_color.setAlpha(255)
+        px_size = max(14, int(font_px or max(14, self.canvas.pen_width * 5)))
+
+        font = QFont("Segoe UI", -1, QFont.Weight.Bold)
+        font.setPixelSize(px_size)
+        metrics = QFontMetrics(font)
+        box_w = max(24.0, float(metrics.horizontalAdvance(clean) + 8))
+        box_h = max(16.0, float(metrics.height() + 4))
+        if center_on_point:
+            max_x = max(0.0, float(self._working_image.width()) - box_w)
+            max_y = max(0.0, float(self._working_image.height()) - box_h)
+            left = max(0.0, min(max_x, float(img_pt.x()) - box_w / 2.0))
+            top = max(0.0, min(max_y, float(img_pt.y()) - box_h / 2.0))
+        else:
+            left = float(img_pt.x())
+            top = float(img_pt.y() - metrics.ascent())
+
+        item = _AnnotationItem(
+            kind="text",
+            color=draw_color,
+            stroke_width=self.canvas.pen_width,
+            rect=QRectF(left, top, box_w, box_h),
+            text=clean,
+            font_px=px_size,
+        )
+        self.canvas.add_item(item, select=True)
+        self._working_image = self.canvas.get_image()
+        self._update_info_label()
+        self.lbl_tool_hint.setText(f'🔤 Placed text "{clean[:24]}" — drag to move/resize')
+        return True
+
+    def pixelate_region(self, rect: QRect, block_size: int = 10) -> bool:
+        """Pixelates/redacts the given rectangular image region (supports Ctrl+Z undo)."""
+        cur_img = self.canvas.get_image()
+        bounded = QRect(rect).normalized().intersected(cur_img.rect())
+        if bounded.width() < 4 or bounded.height() < 4:
+            return False
+        self._push_undo_state()
+        self.canvas.add_item(
+            _AnnotationItem(kind="pixelate", rect=QRectF(bounded), block_size=block_size),
+            select=True,
+        )
+        self._working_image = self.canvas.get_image()
+        self._update_info_label()
+        self.lbl_tool_hint.setText("🫧 Pixelated selected area")
+        return True
 
     def _update_info_label(self) -> None:
         w, h = self.get_target_size()
         src_w = self._working_image.width()
         src_h = self._working_image.height()
-        self.lbl_info.setText(f"{w} × {h} px  (source: {src_w} × {src_h})")
+        zoom_pct = int(round(self.canvas._zoom_factor * 100))
+        self.lbl_info.setText(f"Note: {w} × {h} px  |  Full: {src_w} × {src_h} px • {zoom_pct}%")
 
     def _on_width_changed(self, val: int) -> None:
         if self._updating_spins:
@@ -1223,7 +2792,7 @@ class ImageEditDialog(QDialog):
         if self.chk_aspect.isChecked():
             self._updating_spins = True
             try:
-                new_h = max(16, min(2400, int(round(val / max(1e-6, self._aspect_ratio)))))
+                new_h = max(16, min(self.MAX_DISPLAY_DIM, int(round(val / max(1e-6, self._aspect_ratio)))))
                 self.spin_height.setValue(new_h)
             finally:
                 self._updating_spins = False
@@ -1235,7 +2804,7 @@ class ImageEditDialog(QDialog):
         if self.chk_aspect.isChecked():
             self._updating_spins = True
             try:
-                new_w = max(16, min(2400, int(round(val * max(1e-6, self._aspect_ratio)))))
+                new_w = max(16, min(self.MAX_DISPLAY_DIM, int(round(val * max(1e-6, self._aspect_ratio)))))
                 self.spin_width.setValue(new_w)
             finally:
                 self._updating_spins = False
@@ -1244,6 +2813,23 @@ class ImageEditDialog(QDialog):
     def _on_aspect_toggled(self, checked: bool) -> None:
         if checked:
             self._aspect_ratio = self.spin_width.value() / max(1, self.spin_height.value())
+
+    def _apply_preset_color(self, hex_color: str) -> None:
+        col = QColor(hex_color)
+        if not col.isValid():
+            return
+        self._user_picked_color = True
+        self.canvas.set_pen_color(col)
+        sel = self.canvas.get_selected_item()
+        if sel is not None and sel.kind not in ("pixelate",):
+            self._push_undo_state()
+            item_ref = self.canvas.get_selected_item()
+            if item_ref is not None:
+                item_ref.color = QColor(col)
+                self.canvas._recompose(notify=True)
+        elif self.canvas.tool_mode in ("crop", "eyedropper", "pixelate", "select"):
+            self.select_tool("pen")
+        self.lbl_tool_hint.setText(f"🎨 Color set to {col.name().upper()}")
 
     def _pick_draw_color(self) -> None:
         sidebar = None
@@ -1261,20 +2847,32 @@ class ImageEditDialog(QDialog):
             anchor_widget=self.btn_draw_color,
         )
         if chosen is not None and chosen.isValid():
+            self._user_picked_color = True
             self.canvas.set_pen_color(chosen)
-            if not self.btn_draw.isChecked():
-                self.btn_draw.setChecked(True)
+            sel = self.canvas.get_selected_item()
+            if sel is not None and sel.kind not in ("pixelate",):
+                self._push_undo_state()
+                item_ref = self.canvas.get_selected_item()
+                if item_ref is not None:
+                    item_ref.color = QColor(chosen)
+                    self.canvas._recompose(notify=True)
+            elif self.canvas.tool_mode in ("crop", "eyedropper", "pixelate", "select"):
+                self.select_tool("pen")
 
     def _on_delete_clicked(self) -> None:
         self.delete_requested = True
         self.accept()
 
-    def set_target_size(self, width: int, height: Optional[int] = None) -> None:
-        w = max(16, min(2400, int(width)))
+    def set_target_size(
+        self, width: int, height: Optional[int] = None, record_undo: bool = False
+    ) -> None:
+        if record_undo:
+            self._push_undo_state()
+        w = max(16, min(self.MAX_DISPLAY_DIM, int(width)))
         if height is None:
-            h = max(16, min(2400, int(round(w / max(1e-6, self._aspect_ratio)))))
+            h = max(16, min(self.MAX_DISPLAY_DIM, int(round(w / max(1e-6, self._aspect_ratio)))))
         else:
-            h = max(16, min(2400, int(height)))
+            h = max(16, min(self.MAX_DISPLAY_DIM, int(height)))
             self._aspect_ratio = w / max(1, h)
         self._updating_spins = True
         try:
@@ -1285,16 +2883,20 @@ class ImageEditDialog(QDialog):
         self._update_info_label()
 
     def apply_scale_preset(self, factor: float) -> None:
+        self._push_undo_state()
         base_w = max(1, self._working_image.width())
         base_h = max(1, self._working_image.height())
         self.set_target_size(int(round(base_w * factor)), int(round(base_h * factor)))
 
     def fit_to_width(self, max_width: int = 280) -> None:
+        self._push_undo_state()
         self.set_target_size(max_width)
 
     def rotate_image(self, degrees: int) -> None:
+        self._push_undo_state()
+        src = self.canvas.flatten_items()
         transform = QTransform().rotate(degrees)
-        self._working_image = self._working_image.transformed(
+        self._working_image = src.transformed(
             transform, Qt.TransformationMode.SmoothTransformation
         ).convertToFormat(QImage.Format.Format_ARGB32)
         cur_w, cur_h = self.get_target_size()
@@ -1306,21 +2908,33 @@ class ImageEditDialog(QDialog):
         self.canvas.set_image(self._working_image, clear_crop=True)
 
     def flip_image(self, horizontal: bool = True) -> None:
+        self._push_undo_state()
+        src = self.canvas.flatten_items()
         sx = -1 if horizontal else 1
         sy = 1 if horizontal else -1
         transform = QTransform().scale(sx, sy)
-        self._working_image = self._working_image.transformed(
+        self._working_image = src.transformed(
             transform, Qt.TransformationMode.SmoothTransformation
         ).convertToFormat(QImage.Format.Format_ARGB32)
         self.canvas.set_image(self._working_image, clear_crop=True)
 
     def crop_image(self, rect: QRect) -> bool:
-        bounded = rect.normalized().intersected(self._working_image.rect())
+        cur_img = self.canvas.get_image()
+        bounded = rect.normalized().intersected(cur_img.rect())
         if bounded.width() < 4 or bounded.height() < 4:
             return False
-        self._working_image = self._working_image.copy(bounded)
+        self._push_undo_state()
+        src = self.canvas.flatten_items()
+        prev_disp_w = self.spin_width.value()
+        self._working_image = src.copy(bounded)
         self.canvas.set_image(self._working_image, clear_crop=True)
-        self.set_target_size(bounded.width(), bounded.height())
+        if prev_disp_w <= 280 and bounded.width() > 280:
+            disp_w = 280
+            disp_h = max(16, int(round(bounded.height() * (280.0 / bounded.width()))))
+            self._aspect_ratio = bounded.width() / max(1, bounded.height())
+            self.set_target_size(disp_w, disp_h)
+        else:
+            self.set_target_size(bounded.width(), bounded.height())
         return True
 
     def crop_to_selection(self) -> bool:
@@ -1330,17 +2944,67 @@ class ImageEditDialog(QDialog):
         return self.crop_image(rect)
 
     def apply_grayscale(self) -> None:
+        self._push_undo_state()
+        src = self.canvas.flatten_items()
         self._working_image = (
-            self._working_image.convertToFormat(QImage.Format.Format_Grayscale8)
+            src.convertToFormat(QImage.Format.Format_Grayscale8)
             .convertToFormat(QImage.Format.Format_ARGB32)
         )
         self.canvas.set_image(self._working_image, clear_crop=False)
 
     def apply_invert(self) -> None:
-        img = self._working_image.copy()
+        self._push_undo_state()
+        img = self.canvas.flatten_items().copy()
         img.invertPixels(QImage.InvertMode.InvertRgb)
         self._working_image = img
         self.canvas.set_image(self._working_image, clear_crop=False)
+
+    def apply_brightness_boost(self, delta: int = 20) -> None:
+        """Brightens and enhances image contrast cleanly (undoable via Ctrl+Z)."""
+        cur_img = self.canvas.get_image()
+        if cur_img.isNull():
+            return
+        self._push_undo_state()
+        rgba = self.canvas.flatten_items().convertToFormat(QImage.Format.Format_RGBA8888)
+        buf = bytearray(rgba.constBits())
+        lut = bytes(
+            max(0, min(255, int(round((c - 128) * 1.1 + 128 + delta))))
+            for c in range(256)
+        )
+        buf[0::4] = bytes(buf[0::4]).translate(lut)
+        buf[1::4] = bytes(buf[1::4]).translate(lut)
+        buf[2::4] = bytes(buf[2::4]).translate(lut)
+        adjusted = QImage(
+            bytes(buf),
+            rgba.width(),
+            rgba.height(),
+            rgba.bytesPerLine(),
+            QImage.Format.Format_RGBA8888,
+        )
+        self._working_image = adjusted.convertToFormat(QImage.Format.Format_ARGB32).copy()
+        self.canvas.set_image(self._working_image, clear_crop=False)
+
+    def copy_image_to_clipboard(self) -> QImage:
+        res = self.get_working_image()
+        QApplication.clipboard().setImage(res)
+        self.lbl_tool_hint.setText("📋 Copied image to clipboard")
+        return res
+
+    def export_image_to_file(self, file_path: Optional[str] = None) -> bool:
+        chosen = file_path
+        if chosen is None:
+            chosen, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Edited Image",
+                "edited_image.png",
+                "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;WebP (*.webp);;BMP (*.bmp)",
+            )
+        if not chosen:
+            return False
+        ok = self.get_working_image().save(str(chosen))
+        if ok:
+            self.lbl_tool_hint.setText(f"💾 Saved {Path(chosen).name}")
+        return bool(ok)
 
     def replace_image(self, file_path: Optional[str] = None) -> bool:
         chosen = file_path
@@ -1356,6 +3020,7 @@ class ImageEditDialog(QDialog):
         loaded = QImage(str(chosen))
         if loaded.isNull():
             return False
+        self._push_undo_state()
         self._working_image = loaded.convertToFormat(QImage.Format.Format_ARGB32)
         self.canvas.set_image(self._working_image, clear_crop=True)
         w = self._working_image.width()
@@ -1367,25 +3032,39 @@ class ImageEditDialog(QDialog):
         return True
 
     def reset_image(self) -> None:
+        if (
+            self.canvas.get_image() != self._original_image
+            or self.get_target_size() != (self._orig_w, self._orig_h)
+        ):
+            self._push_undo_state()
         self._working_image = self._original_image.copy()
         self.delete_requested = False
-        self.btn_draw.setChecked(False)
+        self.select_tool("crop")
         self.canvas.set_image(self._working_image, clear_crop=True)
+        self.canvas.reset_zoom()
         self.set_target_size(self._orig_w, self._orig_h)
 
     def get_target_size(self) -> Tuple[int, int]:
         return self.spin_width.value(), self.spin_height.value()
 
-    def get_result_image(self) -> QImage:
-        w, h = self.get_target_size()
-        if w != self._working_image.width() or h != self._working_image.height():
-            return self._working_image.scaled(
-                w,
-                h,
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-        return self._working_image.copy()
+    def get_working_image(self) -> QImage:
+        src = self.canvas.get_image()
+        self._working_image = src
+        return src.copy()
+
+    def get_result_image(self, scale_to_display: bool = True) -> QImage:
+        src = self.canvas.get_image()
+        self._working_image = src
+        if scale_to_display:
+            w, h = self.get_target_size()
+            if w != src.width() or h != src.height():
+                return src.scaled(
+                    w,
+                    h,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+        return src.copy()
 
     def is_fullscreen_mode(self) -> bool:
         return bool(
@@ -1400,10 +3079,44 @@ class ImageEditDialog(QDialog):
                 & ~(Qt.WindowState.WindowMaximized | Qt.WindowState.WindowFullScreen)
             )
             self.showNormal()
+            self.resize(960, 640)
+            screen = (
+                self.screen()
+                or QGuiApplication.screenAt(self.frameGeometry().center())
+                or QGuiApplication.primaryScreen()
+            )
+            if screen is not None:
+                avail = screen.availableGeometry()
+                self.move(
+                    avail.center().x() - self.width() // 2,
+                    avail.center().y() - self.height() // 2,
+                )
         else:
-            self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
-            self.showMaximized()
+            self.setWindowState(
+                self.windowState()
+                | Qt.WindowState.WindowFullScreen
+                | Qt.WindowState.WindowMaximized
+            )
+            self.showFullScreen()
         return self.is_fullscreen_mode()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._initial_fullscreen_applied:
+            self._initial_fullscreen_applied = True
+            if self.is_fullscreen_mode():
+                primary = QGuiApplication.primaryScreen()
+                screen = (
+                    self.screen()
+                    or (
+                        QGuiApplication.screenAt(primary.geometry().center())
+                        if primary is not None
+                        else None
+                    )
+                    or primary
+                )
+                if screen is not None:
+                    self.setGeometry(screen.geometry())
 
     def eventFilter(self, obj, event) -> bool:
         if obj is self.top_bar and event.type() == QEvent.Type.MouseButtonDblClick:
@@ -1702,29 +3415,22 @@ class RichNoteEditor(QTextEdit):
         width: Optional[int] = None,
         height: Optional[int] = None,
     ) -> str:
-        """Replace the selected image at img_cursor with a resized/edited QImage."""
+        """Replace the selected image at img_cursor while preserving full pixel definition."""
         if new_image.isNull():
             return ""
         final_w = int(width) if width is not None and width > 0 else new_image.width()
         final_h = int(height) if height is not None and height > 0 else new_image.height()
-        scaled = new_image
-        if final_w != new_image.width() or final_h != new_image.height():
-            scaled = new_image.scaled(
-                final_w,
-                final_h,
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+        stored = new_image
 
-        data_uri = self._encode_image_data_uri(scaled)
+        data_uri = self._encode_image_data_uri(stored)
         self._has_rich_formatting = True
         self.document().addResource(
-            QTextDocument.ResourceType.ImageResource, QUrl(data_uri), scaled
+            QTextDocument.ResourceType.ImageResource, QUrl(data_uri), stored
         )
         new_fmt = QTextImageFormat()
         new_fmt.setName(data_uri)
-        new_fmt.setWidth(float(scaled.width()))
-        new_fmt.setHeight(float(scaled.height()))
+        new_fmt.setWidth(float(final_w))
+        new_fmt.setHeight(float(final_h))
 
         img_cursor.beginEditBlock()
         try:
@@ -1913,7 +3619,7 @@ class RichNoteEditor(QTextEdit):
 
         target_w, target_h = dlg.get_target_size()
         self.update_image_at_cursor(
-            img_cursor, dlg.get_result_image(), target_w, target_h
+            img_cursor, dlg.get_working_image(), target_w, target_h
         )
         return True
 
@@ -2064,21 +3770,33 @@ class RichNoteEditor(QTextEdit):
         return enabling
 
     def insert_image(self, image: QImage) -> str:
-        """Scale image if wider than 280px, register resource, and insert inline."""
+        """Store image at full resolution (up to 3840px), display at <=280px width inline."""
         if image.isNull():
             return ""
-        max_width = 280
-        if image.width() > max_width:
-            image = image.scaledToWidth(
-                max_width, Qt.TransformationMode.SmoothTransformation
+        max_stored_dim = 3840
+        stored = image
+        if stored.width() > max_stored_dim or stored.height() > max_stored_dim:
+            stored = stored.scaled(
+                max_stored_dim,
+                max_stored_dim,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
             )
-        data_uri = self._encode_image_data_uri(image)
+        disp_w = stored.width()
+        disp_h = stored.height()
+        if disp_w > 280:
+            disp_h = max(1, int(round(disp_h * (280.0 / disp_w))))
+            disp_w = 280
+
+        data_uri = self._encode_image_data_uri(stored)
         self._has_rich_formatting = True
         self.document().addResource(
-            QTextDocument.ResourceType.ImageResource, QUrl(data_uri), image
+            QTextDocument.ResourceType.ImageResource, QUrl(data_uri), stored
         )
         img_fmt = QTextImageFormat()
         img_fmt.setName(data_uri)
+        img_fmt.setWidth(float(disp_w))
+        img_fmt.setHeight(float(disp_h))
         self.textCursor().insertImage(img_fmt)
         return data_uri
 
