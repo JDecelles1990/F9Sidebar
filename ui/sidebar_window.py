@@ -62,6 +62,7 @@ except ImportError:  # pragma: no cover - shiboken6 ships with PySide6
         return obj is not None
 
 from ui.button_fx import install_button_fx
+from ui.sunset_tooltip import install_sunset_tooltips
 from ui.toast_popup import ToastPopup
 
 
@@ -777,6 +778,7 @@ class SidebarWindow(QWidget):
         if app is not None:
             app.installEventFilter(self)
             install_button_fx(app)
+            install_sunset_tooltips(app)
 
     def _setup_styles(self) -> None:
         edge_border = self.DOCK_EDGE_BORDERS.get(
