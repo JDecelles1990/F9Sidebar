@@ -43,18 +43,68 @@ Summon it on any monitor with `F9` for instant access to app/folder/URL shortcut
 
 ## Keyboard Shortcuts
 
-| Shortcut | Scope | Action |
-|---|---|---|
-| `F9` | Global | Toggle sidebar on the monitor holding the cursor |
-| `Ctrl+F9` | Global | Silently capture selection / URL / path / screenshot to Clip Queue |
-| `Ctrl+Alt+F9` | Global | Paste the latest `Ctrl+F9` captured item into the active window |
-| `Shift+F9` | Global | Switch between Panel 1 (Hub) and Panel 2 (Clip Queue) |
-| `Ctrl+Shift+F9` | Global | Pin / unpin sidebar and toggle AppBar dock push-aside |
-| `Ctrl+1` – `Ctrl+9` | Sidebar | Switch Panel 1 note tab |
-| `Ctrl+B` / `I` / `U` | Note Editor | Toggle bold / italic / underline |
-| `Ctrl+Enter` | Note Editor | Run selected text or current line and append output |
-| `Ctrl+C` | Panel 2 | Copy all checked clips using selected join format |
-| `Esc` | Sidebar | Clear Omni-Search filter or hide sidebar (cancels inline edit when editing) |
+### Global Hotkeys (Work Anywhere in Windows)
+| Shortcut | Function |
+|---|---|
+| `F9` | Show or hide the sidebar on the monitor currently holding the mouse cursor |
+| `Ctrl+F9` | Silently copy highlighted text, URLs, file/folder paths, or clipboard screenshots into **2. Clip Queue** without interrupting focus |
+| `Ctrl+Alt+F9` | Paste the most recently special-copied item from **2. Clip Queue** into the active window |
+| `Shift+F9` | Switch between **1. Notes** and **2. Clip Queue** |
+| `Ctrl+Shift+F9` | Toggle pin mode & Windows AppBar docking (keeps sidebar open and pushes aside overlapping maximized windows) |
+
+### Sidebar Navigation, Layout, Profile & Settings
+| Shortcut | Function |
+|---|---|
+| `Ctrl+F` | Move caret into the top-left **Search** bar and select existing query text |
+| `Enter` *(in Search bar)* | Copy inline `=math` result, launch top matching shortcut (`1. Notes`), cycle matching note tabs if only notes match, or copy top matching clip (`2. Clip Queue`) |
+| `Ctrl+Alt+Up` | Dock/move the sidebar to the **top** edge of the screen |
+| `Ctrl+Alt+Down` | Dock/move the sidebar to the **bottom** edge of the screen |
+| `Ctrl+Alt+Left` | Dock/move the sidebar to the **left** edge of the screen |
+| `Ctrl+Alt+Right` | Dock/move the sidebar to the **right** edge of the screen |
+| `Ctrl+Shift+1` | Switch to **1. Notes** (Shortcuts & Rich Notes panel) |
+| `Ctrl+Shift+2` | Switch to **2. Clip Queue** |
+| `Ctrl+Shift+W` | Switch the app to **WORK** profile (`data/work.db`) |
+| `Ctrl+Shift+P` | Switch the app to **PERSONAL** profile (`data/personal.db`) |
+| `Ctrl+Shift+I` / `Ctrl+,` | Open the **Settings & Workspace Backup** dialog |
+| `Tab` / `Enter` | Move focus across sidebar controls and activate the focused button/toggle |
+| `Esc` | Clear active search text, or hide the sidebar and restore focus to the previous window |
+
+### Panel 1 — 1. Notes & Rich Note Editor
+| Shortcut | Function |
+|---|---|
+| `Ctrl+1` – `Ctrl+9` | Switch across the 9 canonical Note Tabs (`Scratchpad`, `Commands`, `Templates`, `Tasks`, `Tickets & Logs`, `Network & IPs`, `Code & Scripts`, `KB & Links`, `Ideas`) |
+| `Ctrl+B` | Toggle **Bold** formatting on selected text or at cursor |
+| `Ctrl+I` | Toggle *Italic* formatting on selected text or at cursor |
+| `Ctrl+U` | Toggle <u>Underline</u> formatting on selected text or at cursor |
+| `Ctrl+Shift+H` | Open highlight color picker to highlight the selected text |
+| `Ctrl+Shift+C` | Open text color picker to change the text color of selected text |
+| `Ctrl+Shift+T` | Insert current timestamp (`YYYY-MM-DD HH:MM`) at the cursor |
+| `Ctrl+Shift+K` | Toggle monospace dark code-block styling on the current or selected paragraph(s) |
+| `Enter` *(in checklist)* | Continue `☐` checklist items on the next line (or exit checklist mode on an empty item) |
+| `F5` | Run all code in the current Note and append output inline (`>>> Output:`) |
+| `Ctrl+F5` | Run only the highlighted/selected code and append output right after the selection |
+| `Ctrl+Shift+F5` | Run highlighted/selected code and special-copy the output **only** into **2. Clip Queue** without modifying the Note |
+| `Ctrl+Enter` | Run highlighted/selected code or current line and append output inline |
+
+### Panel 2 — 2. Clip Queue
+| Shortcut | Function |
+|---|---|
+| `Ctrl+C` | Copy all checked clips joined by the selected separator (`Lines`, `Paragraphs`, `Bullets`) |
+| `Enter` *(inline edit)* | Save inline clip edits and re-classify type (`text`, `url`, `path`) |
+| `Esc` *(inline edit)* | Discard inline clip edits without saving |
+
+### Full-Screen Studio Image Editor
+| Shortcut | Function |
+|---|---|
+| `Ctrl+Z` | Undo last stroke, shape, text edit, resize, move, transform, or filter |
+| `Ctrl+Y` / `Ctrl+Shift+Z` | Redo previously undone edit |
+| `Alt + Left-Click Drag` | Pan/move across the canvas (or Middle/Right-Click drag) |
+| `Mouse Wheel` | Zoom canvas in or out smoothly |
+| `Delete` / `Backspace` | Delete the currently selected drawn item (pen/crayon, highlighter, shape, text, or pixelate box) |
+| `Ctrl+C` | Copy full-resolution edited image to the clipboard |
+| `Ctrl+S` | Apply edits and save image back into the Note |
+| `F11` | Toggle between Full Screen and normal windowed size (`960×640`) |
+| `Esc` | Cancel changes and close the Image Editor |
 
 ---
 

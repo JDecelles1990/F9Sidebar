@@ -756,10 +756,10 @@ class SidebarWindow(QWidget):
         self._sidebar_shortcuts: List[QShortcut] = []
         for seq, handler in (
             ("Ctrl+F", self.focus_search_bar),
-            ("Ctrl+Shift+Up", lambda: self.set_dock_edge("top")),
-            ("Ctrl+Shift+Down", lambda: self.set_dock_edge("bottom")),
-            ("Ctrl+Shift+Left", lambda: self.set_dock_edge("left")),
-            ("Ctrl+Shift+Right", lambda: self.set_dock_edge("right")),
+            ("Ctrl+Alt+Up", lambda: self.set_dock_edge("top")),
+            ("Ctrl+Alt+Down", lambda: self.set_dock_edge("bottom")),
+            ("Ctrl+Alt+Left", lambda: self.set_dock_edge("left")),
+            ("Ctrl+Alt+Right", lambda: self.set_dock_edge("right")),
             ("Ctrl+Shift+I", self.open_settings_dialog),
             ("Ctrl+Shift+1", lambda: self.switch_to_panel(0)),
             ("Ctrl+Shift+!", lambda: self.switch_to_panel(0)),
@@ -944,7 +944,7 @@ class SidebarWindow(QWidget):
         self.btn_dock_edge = QPushButton(self.DOCK_EDGE_SYMBOLS[self.dock_edge])
         self.btn_dock_edge.setObjectName("HeaderBtn")
         self.btn_dock_edge.setToolTip(
-            "Dock Edge: Right (Ctrl+Shift+Arrows, Click to cycle, Right-click for menu)"
+            "Dock Edge: Right (Ctrl+Alt+Arrows, Click to cycle, Right-click for menu)"
         )
         self.btn_dock_edge.clicked.connect(self.cycle_dock_edge)
         self.btn_dock_edge.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1387,7 +1387,7 @@ class SidebarWindow(QWidget):
         if hasattr(self, "btn_dock_edge"):
             self.btn_dock_edge.setText(self.DOCK_EDGE_SYMBOLS[norm])
             self.btn_dock_edge.setToolTip(
-                f"Dock Edge: {norm.capitalize()} (Ctrl+Shift+Arrows, Click to cycle, Right-click for menu)"
+                f"Dock Edge: {norm.capitalize()} (Ctrl+Alt+Arrows, Click to cycle, Right-click for menu)"
             )
         self._setup_styles()
         if hasattr(self.panel_hub, "set_dock_orientation"):
@@ -1707,17 +1707,20 @@ class SidebarWindow(QWidget):
         ctrl_shift = mods == (
             Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
         )
+        ctrl_alt = mods == (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+        )
         no_mod = mods == Qt.KeyboardModifier.NoModifier
 
         if ctrl_only and key == Qt.Key.Key_F:
             return self.focus_search_bar
-        if ctrl_shift and key == Qt.Key.Key_Up:
+        if ctrl_alt and key == Qt.Key.Key_Up:
             return lambda: self.set_dock_edge("top")
-        if ctrl_shift and key == Qt.Key.Key_Down:
+        if ctrl_alt and key == Qt.Key.Key_Down:
             return lambda: self.set_dock_edge("bottom")
-        if ctrl_shift and key == Qt.Key.Key_Left:
+        if ctrl_alt and key == Qt.Key.Key_Left:
             return lambda: self.set_dock_edge("left")
-        if ctrl_shift and key == Qt.Key.Key_Right:
+        if ctrl_alt and key == Qt.Key.Key_Right:
             return lambda: self.set_dock_edge("right")
         if ctrl_shift and key == Qt.Key.Key_I:
             return self.open_settings_dialog

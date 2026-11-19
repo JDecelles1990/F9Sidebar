@@ -47,3 +47,7 @@ C:\Dev\F9Sidebar\
 ## 6. Agent Execution & Verification Environment
 - Always run Python commands and tests using `.\.venv\Scripts\python.exe`.
 - Run automated PySide6 UI verification scripts with `$env:QT_QPA_PLATFORM="offscreen"`.
+
+## 7. Documentation Rules
+- Document every keyboard shortcut and its exact function inside `README.md` under the `## Keyboard Shortcuts` section.
+- Keep `README.md` synchronized whenever any global, sidebar, panel, note editor, or image editor keyboard shortcut is added, changed, or removed.
