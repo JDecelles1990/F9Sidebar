@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 from typing import Callable, Dict, List, Optional, Tuple
 import urllib.parse
 
@@ -4592,7 +4593,7 @@ class PanelHub(QWidget):
         self.btn_color.setFixedSize(26, 24)
         self.btn_color.setIcon(qta.icon("fa5s.palette", color="#89B4FA"))
         self.btn_color.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_color.setToolTip("Change Text Color")
+        self.btn_color.setToolTip("Change Text Color (Ctrl+Shift+C)")
         self.btn_color.clicked.connect(lambda: self.apply_text_color())
         fmt_toolbar.addWidget(self.btn_color)
 
@@ -4600,7 +4601,9 @@ class PanelHub(QWidget):
         self.btn_highlight.setObjectName("FmtBtn")
         self.btn_highlight.setFixedSize(26, 24)
         self.btn_highlight.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_highlight.setToolTip("Highlight Text Color (Right-click to clear highlight)")
+        self.btn_highlight.setToolTip(
+            "Highlight Text Color (Ctrl+Shift+H • Right-click to clear)"
+        )
         self.btn_highlight.clicked.connect(lambda: self.apply_highlight_color())
         self.btn_highlight.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.btn_highlight.customContextMenuRequested.connect(
@@ -4632,7 +4635,9 @@ class PanelHub(QWidget):
         self.btn_run_script.setObjectName("ActionPillBtn")
         self.btn_run_script.setFixedHeight(24)
         self.btn_run_script.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_run_script.setToolTip("Execute selected text or current line & capture output (Ctrl+Enter)")
+        self.btn_run_script.setToolTip(
+            "Run Code — F5: Note | Ctrl+F5: Highlighted | Ctrl+Shift+F5: Highlighted → Clip Queue"
+        )
         self.btn_run_script.clicked.connect(self.run_inline_script)
         fmt_toolbar.addWidget(self.btn_run_script)
 
@@ -5786,28 +5791,33 @@ class PanelHub(QWidget):
             self.save_timer.start()
         return data_uri
 
-    def run_inline_script(self) -> str:
-        """Execute selected text or current line in shell and append output inline."""
-        cursor = self.note_editor.textCursor()
-        if cursor.hasSelection():
-            cmd = cursor.selectedText().replace("\u2029", "\n").strip()
-            insert_pos = cursor.selectionEnd()
-        else:
-            cmd = cursor.block().text().strip()
-            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
-            insert_pos = cursor.position()
-
-        if not cmd:
+    def _execute_script_command(self, cmd: str) -> str:
+        """Runs single-line or multi-line shell code and returns captured output."""
+        cleaned = (cmd or "").strip()
+        if not cleaned:
             return ""
-
+        tmp_path: Optional[str] = None
         try:
-            proc = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+            if "\n" in cleaned:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".cmd", delete=False, encoding="utf-8"
+                ) as tf:
+                    tf.write("@echo off\r\n" + cleaned.replace("\n", "\r\n") + "\r\n")
+                    tmp_path = tf.name
+                proc = subprocess.run(
+                    ["cmd", "/c", tmp_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            else:
+                proc = subprocess.run(
+                    cleaned,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
             combined = "\n".join(
                 part.rstrip()
                 for part in (proc.stdout, proc.stderr)
@@ -5823,6 +5833,73 @@ class PanelHub(QWidget):
             combined = "[Timed out after 10s]"
         except Exception as exc:
             combined = f"[Execution error: {exc}]"
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        return combined
+
+    def run_note_script(self) -> str:
+        """Execute all code in the current Note (F5) and append output inline."""
+        raw = self.note_editor.toPlainText()
+        cmd = raw.split("\n>>> Output:\n", 1)[0].strip()
+        if not cmd:
+            return ""
+        combined = self._execute_script_command(cmd)
+        out_cursor = QTextCursor(self.note_editor.document())
+        out_cursor.movePosition(QTextCursor.MoveOperation.End)
+        out_cursor.insertText(f"\n>>> Output:\n{combined}", QTextCharFormat())
+        self.note_editor.setTextCursor(out_cursor)
+
+        self.save_timer.stop()
+        self._save_active_note()
+        return combined
+
+    def run_highlighted_script(self, output_to_clip_queue_only: bool = False) -> str:
+        """Execute highlighted/selected code (Ctrl+F5 to note, Ctrl+Shift+F5 to Clip Queue only)."""
+        cursor = self.note_editor.textCursor()
+        if not cursor.hasSelection():
+            return ""
+        cmd = cursor.selectedText().replace("\u2029", "\n").strip()
+        if not cmd:
+            return ""
+        combined = self._execute_script_command(cmd)
+
+        if output_to_clip_queue_only:
+            source_type = (
+                "url" if combined.startswith(("http://", "https://")) else "text"
+            )
+            if self.parent_sidebar is not None and hasattr(
+                self.parent_sidebar, "on_new_clip_captured"
+            ):
+                self.parent_sidebar.on_new_clip_captured(combined, source_type)
+            elif hasattr(self.db, "add_clip"):
+                self.db.add_clip(combined, source_type)
+            return combined
+
+        insert_pos = cursor.selectionEnd()
+        out_cursor = QTextCursor(self.note_editor.document())
+        out_cursor.setPosition(insert_pos)
+        out_cursor.insertText(f"\n>>> Output:\n{combined}", QTextCharFormat())
+        self.note_editor.setTextCursor(out_cursor)
+
+        self.save_timer.stop()
+        self._save_active_note()
+        return combined
+
+    def run_inline_script(self) -> str:
+        """Execute selected text or current line in shell and append output inline."""
+        cursor = self.note_editor.textCursor()
+        if cursor.hasSelection():
+            return self.run_highlighted_script(output_to_clip_queue_only=False)
+        cmd = cursor.block().text().strip()
+        if not cmd:
+            return ""
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock)
+        insert_pos = cursor.position()
+        combined = self._execute_script_command(cmd)
 
         out_cursor = QTextCursor(self.note_editor.document())
         out_cursor.setPosition(insert_pos)
@@ -5996,6 +6073,11 @@ class PanelHub(QWidget):
             ("Ctrl+U", self.toggle_underline),
             ("Ctrl+Shift+T", self.note_editor.insert_timestamp),
             ("Ctrl+Shift+K", self.note_editor.toggle_code_block),
+            ("Ctrl+Shift+H", lambda: self.apply_highlight_color()),
+            ("Ctrl+Shift+C", lambda: self.apply_text_color()),
+            ("F5", self.run_note_script),
+            ("Ctrl+F5", lambda: self.run_highlighted_script(False)),
+            ("Ctrl+Shift+F5", lambda: self.run_highlighted_script(True)),
             ("Ctrl+Return", self.run_inline_script),
             ("Ctrl+Enter", self.run_inline_script),
         ):
@@ -6016,9 +6098,14 @@ class PanelHub(QWidget):
         super().hideEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        mods = event.modifiers() & (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.ShiftModifier
+            | Qt.KeyboardModifier.AltModifier
+        )
         if (
             self.isVisible()
-            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            and mods == Qt.KeyboardModifier.ControlModifier
             and Qt.Key.Key_1 <= event.key() <= Qt.Key.Key_9
         ):
             self.switch_to_tab_index(event.key() - Qt.Key.Key_1)

@@ -753,6 +753,26 @@ class SidebarWindow(QWidget):
         self.settings_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         self.settings_shortcut.activated.connect(self.open_settings_dialog)
 
+        self._sidebar_shortcuts: List[QShortcut] = []
+        for seq, handler in (
+            ("Ctrl+F", self.focus_search_bar),
+            ("Ctrl+Shift+Up", lambda: self.set_dock_edge("top")),
+            ("Ctrl+Shift+Down", lambda: self.set_dock_edge("bottom")),
+            ("Ctrl+Shift+Left", lambda: self.set_dock_edge("left")),
+            ("Ctrl+Shift+Right", lambda: self.set_dock_edge("right")),
+            ("Ctrl+Shift+I", self.open_settings_dialog),
+            ("Ctrl+Shift+1", lambda: self.switch_to_panel(0)),
+            ("Ctrl+Shift+!", lambda: self.switch_to_panel(0)),
+            ("Ctrl+Shift+2", lambda: self.switch_to_panel(1)),
+            ("Ctrl+Shift+@", lambda: self.switch_to_panel(1)),
+            ("Ctrl+Shift+P", lambda: self.set_profile("personal")),
+            ("Ctrl+Shift+W", lambda: self.set_profile("work")),
+        ):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.WindowShortcut)
+            sc.activated.connect(handler)
+            self._sidebar_shortcuts.append(sc)
+
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -899,7 +919,8 @@ class SidebarWindow(QWidget):
 
         self.search_input = QLineEdit()
         self.search_input.setObjectName("OmniSearch")
-        self.search_input.setPlaceholderText("Search, calc (=2+2), or launch... (F9)")
+        self.search_input.setPlaceholderText("Search, =calc, or launch... (Ctrl+F)")
+        self.search_input.setToolTip("Search shortcuts, notes, clips, or calculate with =... (Ctrl+F)")
         self.search_input.textChanged.connect(self.refresh_views)
         self.search_input.returnPressed.connect(self._on_omni_enter_pressed)
         top_row.addWidget(self.search_input, 1)
@@ -914,14 +935,16 @@ class SidebarWindow(QWidget):
 
         self.btn_profile = QPushButton("WORK")
         self.btn_profile.setObjectName("PillBtn")
-        self.btn_profile.setToolTip("Toggle Work / Personal SQLite Profile")
+        self.btn_profile.setToolTip(
+            "Toggle Work (Ctrl+Shift+W) / Personal (Ctrl+Shift+P) Profile"
+        )
         self.btn_profile.clicked.connect(self._toggle_profile)
         top_row.addWidget(self.btn_profile)
 
         self.btn_dock_edge = QPushButton(self.DOCK_EDGE_SYMBOLS[self.dock_edge])
         self.btn_dock_edge.setObjectName("HeaderBtn")
         self.btn_dock_edge.setToolTip(
-            "Dock Edge: Right (Click to cycle edge, Right-click for menu)"
+            "Dock Edge: Right (Ctrl+Shift+Arrows, Click to cycle, Right-click for menu)"
         )
         self.btn_dock_edge.clicked.connect(self.cycle_dock_edge)
         self.btn_dock_edge.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -949,7 +972,7 @@ class SidebarWindow(QWidget):
         self.btn_settings = QPushButton()
         self.btn_settings.setObjectName("HeaderBtn")
         self.btn_settings.setIcon(qta.icon("fa5s.cog", color="#CDD6F4"))
-        self.btn_settings.setToolTip("Settings & Workspace Backup (Ctrl+,)")
+        self.btn_settings.setToolTip("Settings & Workspace Backup (Ctrl+Shift+I / Ctrl+,)")
         self.btn_settings.clicked.connect(self.open_settings_dialog)
         top_row.addWidget(self.btn_settings)
 
@@ -960,12 +983,13 @@ class SidebarWindow(QWidget):
         nav_row.setSpacing(6)
 
         self.btn_panel_hub = DroppablePanelSwitchBtn(
-            "1. Hub (Shortcuts & Notes)",
+            "1. Notes",
             panel_index=0,
             on_hover_switch=self.switch_to_panel,
             on_external_drop=self._handle_panel_button_drop,
         )
         self.btn_panel_hub.setObjectName("PillBtn")
+        self.btn_panel_hub.setToolTip("Switch to 1. Notes (Ctrl+Shift+1)")
         self.btn_panel_hub.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.btn_panel_hub.setMinimumHeight(26)
         self.btn_panel_hub.setCheckable(True)
@@ -979,6 +1003,7 @@ class SidebarWindow(QWidget):
             on_external_drop=self._handle_panel_button_drop,
         )
         self.btn_panel_queue.setObjectName("PillBtn")
+        self.btn_panel_queue.setToolTip("Switch to 2. Clip Queue (Ctrl+Shift+2)")
         self.btn_panel_queue.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.btn_panel_queue.setMinimumHeight(26)
         self.btn_panel_queue.setCheckable(True)
@@ -1362,7 +1387,7 @@ class SidebarWindow(QWidget):
         if hasattr(self, "btn_dock_edge"):
             self.btn_dock_edge.setText(self.DOCK_EDGE_SYMBOLS[norm])
             self.btn_dock_edge.setToolTip(
-                f"Dock Edge: {norm.capitalize()} (Click to cycle edge, Right-click for menu)"
+                f"Dock Edge: {norm.capitalize()} (Ctrl+Shift+Arrows, Click to cycle, Right-click for menu)"
             )
         self._setup_styles()
         if hasattr(self.panel_hub, "set_dock_orientation"):
@@ -1561,12 +1586,21 @@ class SidebarWindow(QWidget):
         next_idx = 1 if self.stack.currentIndex() == 0 else 0
         self.switch_to_panel(next_idx)
 
-    def _toggle_profile(self) -> None:
-        new_prof = "personal" if self.db.profile == "work" else "work"
-        self.db.switch_profile(new_prof)
+    def focus_search_bar(self) -> None:
+        """Focuses the Omni-Bar search input and highlights existing query text."""
+        self.search_input.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search_input.selectAll()
+
+    def set_profile(self, profile: str) -> bool:
+        """Switches explicitly to 'work' or 'personal' SQLite profile."""
+        target = "personal" if str(profile or "").lower().strip() == "personal" else "work"
+        if getattr(self.db, "profile", "work") == target:
+            self.btn_profile.setText(target.upper())
+            return False
+        self.db.switch_profile(target)
         if hasattr(self.db, "set_global_setting"):
-            self.db.set_global_setting("active_profile", new_prof)
-        self.btn_profile.setText(new_prof.upper())
+            self.db.set_global_setting("active_profile", target)
+        self.btn_profile.setText(target.upper())
         self.unread_clips = 0
         saved_panel = (
             self.db.get_workspace_setting("active_panel", 0)
@@ -1579,7 +1613,12 @@ class SidebarWindow(QWidget):
             self.switch_to_panel(panel_idx)
         finally:
             self._restoring_state = False
-        self.sig_profile_changed.emit(new_prof)
+        self.sig_profile_changed.emit(target)
+        return True
+
+    def _toggle_profile(self) -> None:
+        new_prof = "personal" if self.db.profile == "work" else "work"
+        self.set_profile(new_prof)
 
     def set_sidebar_opacity(self, percent: int) -> int:
         """Sets window opacity clamped between 40% and 100% and syncs PanelHub's slider."""
@@ -1657,44 +1696,103 @@ class SidebarWindow(QWidget):
                 panel.refresh(filter_query)
 
     # --- Keyboard & Auto-Hide Events ---
+    def _resolve_window_shortcut_action(self, event: QKeyEvent):
+        mods = event.modifiers() & (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.ShiftModifier
+            | Qt.KeyboardModifier.AltModifier
+        )
+        key = event.key()
+        ctrl_only = mods == Qt.KeyboardModifier.ControlModifier
+        ctrl_shift = mods == (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+        )
+        no_mod = mods == Qt.KeyboardModifier.NoModifier
+
+        if ctrl_only and key == Qt.Key.Key_F:
+            return self.focus_search_bar
+        if ctrl_shift and key == Qt.Key.Key_Up:
+            return lambda: self.set_dock_edge("top")
+        if ctrl_shift and key == Qt.Key.Key_Down:
+            return lambda: self.set_dock_edge("bottom")
+        if ctrl_shift and key == Qt.Key.Key_Left:
+            return lambda: self.set_dock_edge("left")
+        if ctrl_shift and key == Qt.Key.Key_Right:
+            return lambda: self.set_dock_edge("right")
+        if ctrl_shift and key == Qt.Key.Key_I:
+            return self.open_settings_dialog
+        if ctrl_shift and key in (Qt.Key.Key_1, Qt.Key.Key_Exclam):
+            return lambda: self.switch_to_panel(0)
+        if ctrl_shift and key in (Qt.Key.Key_2, Qt.Key.Key_At):
+            return lambda: self.switch_to_panel(1)
+        if ctrl_shift and key == Qt.Key.Key_P:
+            return lambda: self.set_profile("personal")
+        if ctrl_shift and key == Qt.Key.Key_W:
+            return lambda: self.set_profile("work")
+
+        if self.stack.currentIndex() == 0 and hasattr(self, "panel_hub"):
+            if ctrl_shift and key == Qt.Key.Key_H:
+                return self.panel_hub.apply_highlight_color
+            if ctrl_shift and key == Qt.Key.Key_C:
+                return self.panel_hub.apply_text_color
+            if no_mod and key == Qt.Key.Key_F5:
+                return self.panel_hub.run_note_script
+            if ctrl_only and key == Qt.Key.Key_F5:
+                return lambda: self.panel_hub.run_highlighted_script(False)
+            if ctrl_shift and key == Qt.Key.Key_F5:
+                return lambda: self.panel_hub.run_highlighted_script(True)
+        return None
+
     def eventFilter(self, obj, event) -> bool:
         if (
             self.isVisible()
-            and event.type() == QEvent.Type.KeyPress
+            and isinstance(obj, QWidget)
+            and obj.window() is self
             and isinstance(event, QKeyEvent)
-            and not event.isAutoRepeat()
-            and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
-            and not (
-                event.modifiers()
-                & (
-                    Qt.KeyboardModifier.ControlModifier
-                    | Qt.KeyboardModifier.AltModifier
-                    | Qt.KeyboardModifier.ShiftModifier
-                )
-            )
         ):
-            focus_widget = QApplication.focusWidget()
-            if (
-                focus_widget is not None
-                and obj is focus_widget
-                and self.isAncestorOf(focus_widget)
-                and focus_widget.window() is self
-            ):
-                if isinstance(focus_widget, QAbstractButton):
-                    if focus_widget.isEnabled():
-                        focus_widget.click()
+            if event.type() == QEvent.Type.ShortcutOverride:
+                if self._resolve_window_shortcut_action(event) is not None:
+                    event.accept()
                     return True
-                if isinstance(focus_widget, QComboBox):
-                    if focus_widget.isEnabled() and not focus_widget.isEditable():
-                        focus_widget.showPopup()
+            elif event.type() == QEvent.Type.KeyPress and not event.isAutoRepeat():
+                action = self._resolve_window_shortcut_action(event)
+                if action is not None:
+                    action()
+                    event.accept()
                     return True
-                if isinstance(focus_widget, QListWidget):
-                    item = focus_widget.currentItem()
-                    if item is not None:
-                        row_widget = focus_widget.itemWidget(item)
-                        if row_widget is not None and hasattr(row_widget, "checkbox"):
-                            row_widget.checkbox.click()
+                if (
+                    event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                    and not (
+                        event.modifiers()
+                        & (
+                            Qt.KeyboardModifier.ControlModifier
+                            | Qt.KeyboardModifier.AltModifier
+                            | Qt.KeyboardModifier.ShiftModifier
+                        )
+                    )
+                ):
+                    focus_widget = QApplication.focusWidget()
+                    if (
+                        focus_widget is not None
+                        and obj is focus_widget
+                        and self.isAncestorOf(focus_widget)
+                        and focus_widget.window() is self
+                    ):
+                        if isinstance(focus_widget, QAbstractButton):
+                            if focus_widget.isEnabled():
+                                focus_widget.click()
                             return True
+                        if isinstance(focus_widget, QComboBox):
+                            if focus_widget.isEnabled() and not focus_widget.isEditable():
+                                focus_widget.showPopup()
+                            return True
+                        if isinstance(focus_widget, QListWidget):
+                            item = focus_widget.currentItem()
+                            if item is not None:
+                                row_widget = focus_widget.itemWidget(item)
+                                if row_widget is not None and hasattr(row_widget, "checkbox"):
+                                    row_widget.checkbox.click()
+                                    return True
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:

@@ -714,6 +714,15 @@ class PanelQueue(QWidget):
                 border: 1px solid #363A4F;
                 border-radius: 4px;
             }
+            QLabel#HotkeyHintLabel {
+                background-color: #241E34;
+                border: 1px solid #363A4F;
+                border-radius: 4px;
+                color: #F9E2AF;
+                font-size: 10px;
+                font-weight: 600;
+                padding: 2px 6px;
+            }
             QLabel {
                 color: #CDD6F4;
                 font-size: 12px;
@@ -852,6 +861,26 @@ class PanelQueue(QWidget):
 
         root.addLayout(header_row)
 
+        # --- Hotkey Reminder Badges ---
+        hotkey_row = QHBoxLayout()
+        hotkey_row.setSpacing(6)
+
+        self.lbl_hotkey_copy = QLabel("📋 Special Copy: Ctrl+F9")
+        self.lbl_hotkey_copy.setObjectName("HotkeyHintLabel")
+        self.lbl_hotkey_copy.setToolTip(
+            "Highlight text, URLs, or file paths anywhere and press Ctrl+F9 to add to Clip Queue"
+        )
+        hotkey_row.addWidget(self.lbl_hotkey_copy)
+
+        self.lbl_hotkey_paste = QLabel("⚡ Paste Last: Ctrl+Alt+F9")
+        self.lbl_hotkey_paste.setObjectName("HotkeyHintLabel")
+        self.lbl_hotkey_paste.setToolTip(
+            "Press Ctrl+Alt+F9 anywhere to paste the latest item captured into Clip Queue"
+        )
+        hotkey_row.addWidget(self.lbl_hotkey_paste)
+        hotkey_row.addStretch(1)
+        root.addLayout(hotkey_row)
+
         # --- Draggable Checkable Queue ---
         self.list_widget = ClipListWidget(
             on_rows_reordered=self._on_rows_reordered,
@@ -903,6 +932,10 @@ class PanelQueue(QWidget):
             and isinstance(event, QKeyEvent)
             and event.key() == Qt.Key.Key_C
             and (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            and not (
+                event.modifiers()
+                & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier)
+            )
         ):
             self.copy_selected_clips()
             return True
