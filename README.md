@@ -96,15 +96,36 @@ Summon it on any monitor with `F9` for instant access to app/folder/URL shortcut
 ### Full-Screen Studio Image Editor
 | Shortcut | Function |
 |---|---|
-| `Ctrl+Z` | Undo last stroke, shape, text edit, resize, move, transform, or filter |
+| `V` | Switch to **Select / Move / Resize** tool (`🖱️`) |
+| `C` | Switch to **Crop** tool (`✂️`) |
+| `P` | Switch to **Freehand Pen** tool (`🖊️`) |
+| `H` | Switch to **Highlighter** tool (`🖍️`) |
+| `L` | Switch to **Straight Line** tool (`📏`) |
+| `A` | Switch to **Arrow** tool (`➡️`) |
+| `R` | Switch to **Rectangle** tool (`🔲`) |
+| `O` | Switch to **Circle / Ellipse** tool (`⭕`) |
+| `T` | Switch to **Inline Text & Callout** tool (`🔤`) |
+| `N` | Switch to **Numbered / Lettered Step Stamp** tool (`1️⃣`) |
+| `B` | Switch to **Redact** tool (`🫧` — Pixelate / Blur / Blackout) |
+| `S` | Switch to **Spotlight** focus dim tool (`🔦`) |
+| `I` | Switch to **Eyedropper** color sampler (`💧`) |
+| `Ctrl+Z` | Undo last stroke, shape, text edit, resize, move, filter, or Beautify change |
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo previously undone edit |
-| `Alt + Left-Click Drag` | Pan/move across the canvas (or Middle/Right-Click drag) |
-| `Mouse Wheel` | Zoom canvas in or out smoothly |
-| `Delete` / `Backspace` | Delete the currently selected drawn item (pen/crayon, highlighter, shape, text, or pixelate box) |
-| `Ctrl+C` | Copy full-resolution edited image to the clipboard |
+| `Ctrl+D` | Duplicate the currently selected annotation or image overlay layer |
+| `Ctrl+V` | Paste an image from the clipboard onto the canvas as a movable/resizable overlay layer |
+| `Ctrl + Left-Click Drag` | Constrain drawing & handle resizing: perfect circles (`⭕`), perfect squares (`🔲` / `✂️` / `🫧` / `🔦`), locked overlay aspect ratio, and straight `0°`/`45°`/`90°` lines (`📏` / `➡️` / `🖊️` / `🖍️`) |
+| `Alt + Left-Click Drag` | Pan/move across the canvas (or Middle-Click drag / Right-Click drag) |
+| `Right-Click` | Open quick layer menu on hovered item (`Duplicate`, layer front/back, `Delete`) or canvas actions |
+| `Arrow Keys` / `Shift + Arrow Keys` | Nudge the currently selected item by `1 px` (`Shift` nudges by `10 px`) |
+| `]` / `[` | Bring selected layer **forward** / send **backward** by one step |
+| `Ctrl+]` / `Ctrl+[` | Bring selected layer to **front** / send to **back** |
+| `+` / `-` / `0` *(or `Mouse Wheel`)* | Zoom canvas in (`+`), zoom out (`-`), or reset zoom & pan to `100%` (`0`) |
+| `Enter` / `Shift+Enter` | Apply active crop box (`✂️`), or commit inline text (`Enter`) / insert newline (`Shift+Enter`) while typing |
+| `Delete` / `Backspace` | Delete the currently selected annotation, stamp, redact, spotlight, or image overlay layer |
+| `Ctrl+C` | Copy full-resolution edited (and Beautified) image to the clipboard |
 | `Ctrl+S` | Apply edits and save image back into the Note |
 | `F11` | Toggle between Full Screen and normal windowed size (`960×640`) |
-| `Esc` | Cancel changes and close the Image Editor |
+| `Esc` | Layered cancel/close: cancel inline text → clear active crop box → deselect item & switch to Select mouse (`🖱️`) → close the Image Editor |
 
 ---
 
@@ -157,3 +178,4 @@ F9Sidebar/
     ├── panel_hub.py        # Panel 1: 6-col shortcut grid, rich notes, ImageEditDialog, note history
     └── panel_queue.py      # Panel 2: draggable checkable clip queue, quick copy, inline edit, batch copy
 ```
+

@@ -124,7 +124,7 @@ class SunsetTooltipPopup(QWidget):
     GLOW_MARGIN = 10
     CARD_RADIUS = 10.0
     MAX_TEXT_WIDTH = 330
-    SLIDE_OFFSET_PX = 6
+    SLIDE_OFFSET_PX = 5
     PAD_X = 11
     PAD_TOP = 8
     PAD_BOTTOM = 7
@@ -136,6 +136,8 @@ class SunsetTooltipPopup(QWidget):
             Qt.WindowType.ToolTip
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowTransparentForInput
+            | Qt.WindowType.WindowDoesNotAcceptFocus
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -221,7 +223,7 @@ class SunsetTooltipPopup(QWidget):
         w = self.width()
         h = self.height()
         m = self.GLOW_MARGIN
-        gap = 4
+        gap = 8
 
         is_item_viewport = (
             target is not None
@@ -569,12 +571,31 @@ class SunsetTooltipManager(QObject):
             tip = self._resolve_tooltip_text(obj, local_pos)
             if not tip:
                 return False
+            is_item_viewport = isinstance(obj.parentWidget(), QAbstractItemView)
+            if (
+                obj is self._current_target
+                and self.popup.isVisible()
+                and not self.popup._is_fading_out
+                and self.popup.raw_text == tip
+                and not is_item_viewport
+            ):
+                self._leave_hide_timer.stop()
+                self.popup.auto_hide_timer.start(8000)
+                event.accept()
+                return True
             gpos = event.globalPos() if isinstance(event, QHelpEvent) else QCursor.pos()
             self.show_tooltip(obj, tip, gpos)
             event.accept()
             return True
 
         if etype == QEvent.Type.Enter and isinstance(obj, QWidget):
+            if obj is self._current_target:
+                self._leave_hide_timer.stop()
+                if self.popup._is_fading_out:
+                    tip = self._resolve_tooltip_text(obj)
+                    if tip:
+                        self.show_tooltip(obj, tip, QCursor.pos())
+                return False
             if self.popup.isVisible() or self._glide_window_timer.isActive():
                 tip = self._resolve_tooltip_text(obj)
                 if tip and obj is not self._current_target:
