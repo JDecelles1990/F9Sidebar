@@ -616,6 +616,9 @@ class PanelQueue(QWidget):
                 background-color: transparent;
                 color: #CDD6F4;
             }
+            QWidget#ClipListViewport {
+                background: transparent;
+            }
             QCheckBox {
                 color: #CDD6F4;
                 font-size: 12px;
@@ -628,8 +631,8 @@ class PanelQueue(QWidget):
                 width: 15px;
                 height: 15px;
                 border-radius: 4px;
-                border: 1px solid #363A4F;
-                background-color: #1E1E2E;
+                border: 1px solid rgba(250, 179, 135, 86);
+                background-color: rgba(24, 17, 36, 165);
             }
             QCheckBox::indicator:hover, QCheckBox::indicator:focus {
                 border-color: #FAB387;
@@ -647,11 +650,8 @@ class PanelQueue(QWidget):
                 font-weight: 600;
             }
             QPushButton#ActionBtn {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:1 #342945
-                );
-                border: 1px solid #363A4F;
+                background-color: rgba(34, 23, 46, 152);
+                border: 1px solid rgba(250, 179, 135, 78);
                 border-radius: 5px;
                 color: #CDD6F4;
                 padding: 4px 8px;
@@ -659,7 +659,7 @@ class PanelQueue(QWidget):
                 font-weight: 600;
             }
             QPushButton#ActionBtn:hover:enabled {
-                background-color: #363A4F;
+                background-color: rgba(74, 42, 74, 195);
                 border-color: #FAB387;
             }
             QPushButton#ActionBtn:focus {
@@ -667,35 +667,27 @@ class PanelQueue(QWidget):
             }
             QPushButton#ActionBtn:disabled {
                 color: #6C7086;
-                border-color: #2A2D3E;
+                border-color: rgba(42, 45, 62, 120);
             }
             QListWidget#ClipList {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:0.5, y2:1,
-                    stop:0 #1E1E2E, stop:1 #272038
-                );
-                border: 1px solid #363A4F;
-                border-radius: 6px;
+                background-color: rgba(24, 17, 36, 130);
+                border: 1px solid rgba(250, 179, 135, 86);
+                border-radius: 7px;
                 padding: 4px;
                 outline: none;
             }
             QListWidget#ClipList::item {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:1 #342946
-                );
-                border: 1px solid #363A4F;
+                background-color: rgba(36, 24, 48, 152);
+                border: 1px solid rgba(243, 139, 168, 78);
                 border-radius: 6px;
                 color: #CDD6F4;
             }
             QListWidget#ClipList::item:selected {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #312B46, stop:1 #3D2B4E
-                );
+                background-color: rgba(68, 38, 74, 196);
                 border: 1px solid #FAB387;
             }
             QListWidget#ClipList::item:hover {
+                background-color: rgba(58, 35, 68, 182);
                 border: 1px solid #CBA6F7;
             }
             QWidget#ClipRowWidget {
@@ -710,13 +702,13 @@ class PanelQueue(QWidget):
                 font-size: 12px;
             }
             QLabel#ClipThumbLabel {
-                background-color: #1E1E2E;
-                border: 1px solid #363A4F;
+                background-color: rgba(24, 17, 36, 165);
+                border: 1px solid rgba(250, 179, 135, 72);
                 border-radius: 4px;
             }
             QLabel#HotkeyHintLabel {
-                background-color: #241E34;
-                border: 1px solid #363A4F;
+                background-color: rgba(34, 23, 46, 152);
+                border: 1px solid rgba(250, 179, 135, 72);
                 border-radius: 4px;
                 color: #F9E2AF;
                 font-size: 10px;
@@ -729,11 +721,8 @@ class PanelQueue(QWidget):
                 background-color: transparent;
             }
             QPushButton#RowPinBtn, QPushButton#RowActionBtn, QPushButton#RowDeleteBtn {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #1E1E2E, stop:1 #292238
-                );
-                border: 1px solid #363A4F;
+                background-color: rgba(34, 23, 46, 152);
+                border: 1px solid rgba(250, 179, 135, 72);
                 border-radius: 4px;
                 color: #CDD6F4;
                 font-size: 13px;
@@ -744,7 +733,7 @@ class PanelQueue(QWidget):
                 color: #A6ADC8;
             }
             QPushButton#RowPinBtn:hover {
-                background-color: #363A4F;
+                background-color: rgba(68, 38, 72, 190);
                 border-color: #F9E2AF;
                 color: #F9E2AF;
             }
@@ -773,11 +762,8 @@ class PanelQueue(QWidget):
                 color: #1E1E2E;
             }
             QComboBox#JoinCombo {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:1 #342945
-                );
-                border: 1px solid #363A4F;
+                background-color: rgba(34, 23, 46, 152);
+                border: 1px solid rgba(250, 179, 135, 80);
                 border-radius: 6px;
                 color: #CDD6F4;
                 padding: 6px 10px;
@@ -887,6 +873,8 @@ class PanelQueue(QWidget):
             on_external_drop=self.handle_external_drop,
             parent=self,
         )
+        self.list_widget.viewport().setObjectName("ClipListViewport")
+        self.list_widget.viewport().setAutoFillBackground(False)
         from ui.sidebar_window import SunsetFadeOverlay
 
         self.queue_transition = SunsetFadeOverlay(self.list_widget)

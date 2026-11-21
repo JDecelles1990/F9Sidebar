@@ -125,8 +125,8 @@ def _pick_color_positioned(
         """
         QColorDialog {
             background-color: qlineargradient(
-                x1:0, y1:0, x2:0.4, y2:1,
-                stop:0 #1E1E2E, stop:0.6 #282039, stop:1 #34233E
+                x1:0, y1:0, x2:0.55, y2:1,
+                stop:0 #181626, stop:0.48 #2E1F3A, stop:0.80 #612E48, stop:1 #8E4152
             );
             color: #CDD6F4;
             font-family: 'Segoe UI', sans-serif;
@@ -475,8 +475,8 @@ class ShortcutDialog(QDialog):
             """
             QDialog {
                 background-color: qlineargradient(
-                    x1:0, y1:0, x2:0.4, y2:1,
-                    stop:0 #1E1E2E, stop:0.6 #282039, stop:1 #34233E
+                    x1:0, y1:0, x2:0.55, y2:1,
+                    stop:0 #181626, stop:0.48 #2E1F3A, stop:0.80 #612E48, stop:1 #8E4152
                 );
                 color: #CDD6F4;
                 font-family: 'Segoe UI', sans-serif;
@@ -3606,8 +3606,8 @@ class ImageEditDialog(QDialog):
             """
             QDialog {
                 background-color: qlineargradient(
-                    x1:0, y1:0, x2:0.4, y2:1,
-                    stop:0 #181624, stop:0.6 #241D35, stop:1 #30213B
+                    x1:0, y1:0, x2:0.55, y2:1,
+                    stop:0 #181626, stop:0.48 #2E1F3A, stop:0.80 #612E48, stop:1 #8E4152
                 );
                 color: #CDD6F4;
                 font-family: 'Segoe UI Emoji', 'Segoe UI', sans-serif;
@@ -6501,8 +6501,8 @@ class NoteHistoryDialog(QDialog):
             """
             QDialog {
                 background-color: qlineargradient(
-                    x1:0, y1:0, x2:0.4, y2:1,
-                    stop:0 #1E1E2E, stop:0.6 #282039, stop:1 #34233E
+                    x1:0, y1:0, x2:0.55, y2:1,
+                    stop:0 #181626, stop:0.48 #2E1F3A, stop:0.80 #612E48, stop:1 #8E4152
                 );
                 color: #CDD6F4;
                 font-family: 'Segoe UI', sans-serif;
@@ -6719,6 +6719,9 @@ class PanelHub(QWidget):
                 background-color: transparent;
                 color: #CDD6F4;
             }
+            QWidget#GridViewport, QWidget#NoteViewport {
+                background: transparent;
+            }
             QSplitter::handle {
                 background-color: qlineargradient(
                     x1:0, y1:0, x2:1, y2:0,
@@ -6748,11 +6751,8 @@ class PanelHub(QWidget):
                 padding: 8px;
             }
             QPushButton#AddShortcutBtn {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:1 #352946
-                );
-                border: 1px solid #363A4F;
+                background-color: rgba(36, 25, 48, 155);
+                border: 1px solid rgba(250, 179, 135, 78);
                 border-radius: 5px;
                 color: #CDD6F4;
                 font-size: 14px;
@@ -6768,27 +6768,21 @@ class PanelHub(QWidget):
                 border: 1px solid #FAB387;
             }
             QScrollArea#GridScroll {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:0.6 #2F2942, stop:1 #352946
-                );
-                border: 1px solid #363A4F;
-                border-radius: 6px;
+                background-color: rgba(24, 17, 36, 128);
+                border: 1px solid rgba(250, 179, 135, 86);
+                border-radius: 7px;
             }
             QWidget#GridContainer {
                 background-color: transparent;
             }
             QToolButton#ShortcutTile {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #1E1E2E, stop:1 #2A2238
-                );
-                border: 1px solid #363A4F;
+                background-color: rgba(34, 23, 46, 150);
+                border: 1px solid rgba(243, 139, 168, 80);
                 border-radius: 6px;
                 padding: 4px;
             }
             QToolButton#ShortcutTile:hover {
-                background-color: #363A4F;
+                background-color: rgba(68, 38, 72, 190);
                 border-color: #FAB387;
             }
             QToolButton#ShortcutTile:focus {
@@ -6798,12 +6792,9 @@ class PanelHub(QWidget):
                 background-color: #45375A;
             }
             QTextEdit#NoteEditor {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:0.6 #2F2942, stop:1 #352946
-                );
-                border: 1px solid #363A4F;
-                border-radius: 6px;
+                background-color: rgba(22, 16, 34, 150);
+                border: 1px solid rgba(250, 179, 135, 86);
+                border-radius: 7px;
                 color: #CDD6F4;
                 padding: 8px;
                 font-family: 'Consolas', 'Segoe UI', monospace;
@@ -6815,11 +6806,8 @@ class PanelHub(QWidget):
                 border-color: #FAB387;
             }
             QPushButton#FmtBtn, QPushButton#ActionPillBtn, QPushButton#AutoSortBtn {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:1 #342945
-                );
-                border: 1px solid #363A4F;
+                background-color: rgba(36, 25, 48, 155);
+                border: 1px solid rgba(250, 179, 135, 78);
                 border-radius: 5px;
                 color: #CDD6F4;
                 padding: 2px 7px;
@@ -6831,7 +6819,7 @@ class PanelHub(QWidget):
                 font-size: 12px;
             }
             QPushButton#FmtBtn:hover, QPushButton#ActionPillBtn:hover, QPushButton#AutoSortBtn:hover {
-                background-color: #363A4F;
+                background-color: rgba(74, 42, 74, 195);
                 border-color: #FAB387;
             }
             QPushButton#FmtBtn:focus, QPushButton#ActionPillBtn:focus, QPushButton#AutoSortBtn:focus {
@@ -6854,11 +6842,8 @@ class PanelHub(QWidget):
                 font-weight: 600;
             }
             QPushButton#CopyAllBtn {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:1 #342945
-                );
-                border: 1px solid #363A4F;
+                background-color: rgba(36, 25, 48, 155);
+                border: 1px solid rgba(250, 179, 135, 78);
                 border-radius: 5px;
                 color: #CDD6F4;
                 padding: 4px 10px;
@@ -6904,12 +6889,9 @@ class PanelHub(QWidget):
                 border: 2px solid #F9E2AF;
             }
             QWidget#NoteRail {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:0.6 #2F2942, stop:1 #352946
-                );
-                border: 1px solid #363A4F;
-                border-radius: 6px;
+                background-color: rgba(26, 18, 38, 145);
+                border: 1px solid rgba(243, 139, 168, 84);
+                border-radius: 7px;
             }
             QToolButton#NoteTabBtn {
                 background-color: transparent;
@@ -6984,6 +6966,8 @@ class PanelHub(QWidget):
         self.grid_scroll.setObjectName("GridScroll")
         self.grid_scroll.setWidgetResizable(True)
         self.grid_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.grid_scroll.viewport().setObjectName("GridViewport")
+        self.grid_scroll.viewport().setAutoFillBackground(False)
 
         self.grid_container = QWidget()
         self.grid_container.setObjectName("GridContainer")
@@ -7100,6 +7084,8 @@ class PanelHub(QWidget):
 
         self.note_editor = RichNoteEditor()
         self.note_editor.setObjectName("NoteEditor")
+        self.note_editor.viewport().setObjectName("NoteViewport")
+        self.note_editor.viewport().setAutoFillBackground(False)
         self.note_editor.setPlaceholderText("Write rich notes, paste images, checklists, or run commands... (auto-saved)")
         self.note_editor.textChanged.connect(self._on_note_text_changed)
         self.note_editor.currentCharFormatChanged.connect(self._sync_format_buttons)

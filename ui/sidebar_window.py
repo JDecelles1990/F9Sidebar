@@ -1,4 +1,5 @@
 import ast
+import math
 import operator as _op
 from pathlib import Path
 import sys
@@ -9,9 +10,11 @@ from PySide6.QtCore import (
     QEvent,
     QMimeData,
     QPoint,
+    QPointF,
     QPropertyAnimation,
     QRect,
     QRectF,
+    QSizeF,
     Qt,
     QTimer,
     QVariantAnimation,
@@ -28,6 +31,9 @@ from PySide6.QtGui import (
     QLinearGradient,
     QMouseEvent,
     QPainter,
+    QPainterPath,
+    QPen,
+    QRadialGradient,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -214,6 +220,126 @@ class SunsetFadeOverlay(QWidget):
             glow_grad.setColorAt(0.5, c_pink)
             glow_grad.setColorAt(1.0, c_lav)
             painter.fillRect(0, 0, self.width(), 2, QBrush(glow_grad))
+        finally:
+            painter.end()
+
+
+class InteractiveGlassOverlay(QWidget):
+    """Mouse-transparent overlay painting frosted glass refraction & proximity rim glow."""
+
+    def __init__(self, parent: "SidebarWindow"):
+        super().__init__(parent)
+        self.setObjectName("InteractiveGlassOverlay")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def _glass_targets(self, sb: "SidebarWindow") -> List[QWidget]:
+        targets: List[QWidget] = [
+            sb.search_input,
+            sb.btn_profile,
+            sb.btn_dock_edge,
+            sb.btn_appbar,
+            sb.btn_pin,
+            sb.btn_settings,
+            sb.btn_panel_hub,
+            sb.btn_panel_queue,
+        ]
+        if sb.stack.currentIndex() == 0 and hasattr(sb, "panel_hub"):
+            for attr in ("grid_scroll", "note_editor", "rail_widget"):
+                w = getattr(sb.panel_hub, attr, None)
+                if w is not None:
+                    targets.append(w)
+        elif hasattr(sb, "panel_queue"):
+            for attr in ("list_widget", "cmb_join_format", "btn_copy_selected"):
+                w = getattr(sb.panel_queue, attr, None)
+                if w is not None:
+                    targets.append(w)
+        return targets
+
+    def paintEvent(self, event) -> None:
+        sb = self.parentWidget()
+        if sb is None or not _qt_is_valid(sb) or self.width() <= 0 or self.height() <= 0:
+            return
+
+        w = float(self.width())
+        h = float(self.height())
+        hp = QPointF(getattr(sb, "_hover_pos", QPointF(w * 0.5, h * 0.35)))
+        intensity = max(0.25, min(1.0, float(getattr(sb, "_hover_intensity", 0.45))))
+        phase = float(getattr(sb, "_cloud_phase", 0.0))
+
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+            # Layer A: Parallax Diagonal Frosted-Glass Refraction Bands
+            parallax_x = (hp.x() - w * 0.5) * 0.08
+            drift = math.sin(phase * 2.0 * math.pi) * 14.0
+            for band_idx, (y_top, y_bot, x_skew, a1, a2) in enumerate(
+                (
+                    (-20.0, h * 0.62, 110.0, 15, 9),
+                    (h * 0.28, h + 20.0, 145.0, 12, 7),
+                )
+            ):
+                shift = parallax_x * (1.0 if band_idx == 0 else -0.75) + drift
+                x_left = w * (0.12 + band_idx * 0.36) + shift
+                band_w = w * 0.34
+                poly_path = QPainterPath()
+                poly_path.moveTo(x_left, y_top)
+                poly_path.lineTo(x_left + band_w, y_top)
+                poly_path.lineTo(x_left + band_w - x_skew, y_bot)
+                poly_path.lineTo(x_left - x_skew, y_bot)
+                poly_path.closeSubpath()
+                band_grad = QLinearGradient(x_left, y_top, x_left + band_w - x_skew, y_bot)
+                band_grad.setColorAt(0.0, QColor(255, 243, 230, 0))
+                band_grad.setColorAt(0.35, QColor(255, 243, 230, int(a1 * (0.65 + 0.35 * intensity))))
+                band_grad.setColorAt(0.68, QColor(250, 179, 135, int(a2 * (0.65 + 0.35 * intensity))))
+                band_grad.setColorAt(1.0, QColor(243, 139, 168, 0))
+                painter.fillPath(poly_path, QBrush(band_grad))
+
+            # Layer B: Cursor-Tracked Specular Glass Lens Highlight
+            lens = QRadialGradient(hp, 135.0)
+            lens.setColorAt(0.0, QColor(255, 243, 230, int(round(44 * intensity))))
+            lens.setColorAt(0.42, QColor(250, 179, 135, int(round(25 * intensity))))
+            lens.setColorAt(0.76, QColor(243, 139, 168, int(round(12 * intensity))))
+            lens.setColorAt(1.0, QColor(243, 139, 168, 0))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(lens))
+            painter.drawEllipse(hp, 135.0, 135.0)
+
+            # Layer C: Proximity-Illuminated Glass Card Rim Refraction & Top Bevel
+            for target in self._glass_targets(sb):
+                if (
+                    not _qt_is_valid(target)
+                    or not sb.isAncestorOf(target)
+                    or not target.isVisible()
+                    or target.width() <= 2
+                    or target.height() <= 2
+                ):
+                    continue
+                tl = QPointF(target.mapTo(sb, QPoint(0, 0)))
+                r = QRectF(tl, QSizeF(target.size()))
+
+                # Subtle 1px top glass bevel
+                bevel_grad = QLinearGradient(r.left() + 4.0, r.top(), r.right() - 4.0, r.top())
+                bevel_grad.setColorAt(0.0, QColor(255, 243, 230, 14))
+                bevel_grad.setColorAt(0.5, QColor(255, 243, 230, 48))
+                bevel_grad.setColorAt(1.0, QColor(255, 243, 230, 14))
+                painter.setPen(QPen(QBrush(bevel_grad), 1.0))
+                painter.drawLine(
+                    QPointF(r.left() + 6.0, r.top() + 0.8),
+                    QPointF(r.right() - 6.0, r.top() + 0.8),
+                )
+
+                # Cursor-centered proximity rim glow
+                rim_grad = QRadialGradient(hp, 195.0)
+                rim_grad.setColorAt(0.0, QColor(255, 243, 230, int(round(190 * intensity))))
+                rim_grad.setColorAt(0.4, QColor(250, 179, 135, int(round(140 * intensity))))
+                rim_grad.setColorAt(0.75, QColor(243, 139, 168, int(round(80 * intensity))))
+                rim_grad.setColorAt(1.0, QColor(243, 139, 168, 0))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QBrush(rim_grad), 1.35))
+                painter.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 6.5, 6.5)
         finally:
             painter.end()
 
@@ -414,8 +540,8 @@ class SettingsDialog(QDialog):
             """
             QDialog {
                 background-color: qlineargradient(
-                    x1:0, y1:0, x2:0.4, y2:1,
-                    stop:0 #1E1E2E, stop:0.6 #282039, stop:1 #35233D
+                    x1:0, y1:0, x2:0.55, y2:1,
+                    stop:0 #1E1A30, stop:0.42 #35203D, stop:0.75 #6E324C, stop:1 #9A4656
                 );
                 color: #CDD6F4;
                 font-family: 'Segoe UI', sans-serif;
@@ -433,11 +559,8 @@ class SettingsDialog(QDialog):
                 margin-top: 6px;
             }
             QLineEdit, QSpinBox, QComboBox {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:1 #342945
-                );
-                border: 1px solid #363A4F;
+                background-color: rgba(28, 20, 40, 165);
+                border: 1px solid rgba(250, 179, 135, 88);
                 border-radius: 5px;
                 padding: 4px 8px;
                 color: #CDD6F4;
@@ -452,11 +575,8 @@ class SettingsDialog(QDialog):
                 spacing: 6px;
             }
             QPushButton {
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:1 #342945
-                );
-                border: 1px solid #363A4F;
+                background-color: rgba(36, 25, 48, 165);
+                border: 1px solid rgba(250, 179, 135, 82);
                 border-radius: 5px;
                 color: #CDD6F4;
                 padding: 5px 10px;
@@ -464,12 +584,12 @@ class SettingsDialog(QDialog):
                 font-weight: 600;
             }
             QPushButton:hover {
-                background-color: #363A4F;
+                background-color: rgba(70, 40, 74, 205);
                 border-color: #FAB387;
             }
             QScrollArea {
-                background-color: rgba(30, 30, 46, 0.55);
-                border: 1px solid #363A4F;
+                background-color: rgba(28, 20, 40, 165);
+                border: 1px solid rgba(250, 179, 135, 88);
                 border-radius: 6px;
             }
             """
@@ -719,6 +839,19 @@ class SidebarWindow(QWidget):
         self._last_appbar_rect: QRect | None = None
         self.sidebar_opacity = 100
         self.unread_clips = 0
+        self._cloud_phase = 0.0
+        self._hover_pos = QPointF(190.0, 220.0)
+        self._target_hover_pos = QPointF(190.0, 220.0)
+        self._hover_active = False
+        self._hover_intensity = 0.45
+
+        self.backdrop_anim = QVariantAnimation(self)
+        self.backdrop_anim.setStartValue(0.0)
+        self.backdrop_anim.setEndValue(1.0)
+        self.backdrop_anim.setDuration(7200)
+        self.backdrop_anim.setLoopCount(-1)
+        self.backdrop_anim.valueChanged.connect(self._on_backdrop_tick)
+
         self.toast = ToastPopup()
         self.destroyed.connect(
             lambda *_args, t=self.toast: t.close() if _qt_is_valid(t) else None
@@ -788,23 +921,21 @@ class SidebarWindow(QWidget):
             f"""
             QWidget#SidebarRoot {{
                 background-color: qlineargradient(
-                    x1:0, y1:0, x2:0.35, y2:1,
-                    stop:0 #1E1E2E,
-                    stop:0.5 #241E36,
-                    stop:0.85 #2D213C,
-                    stop:1 #35233D
+                    x1:0, y1:0, x2:0.55, y2:1,
+                    stop:0 #1E1A30,
+                    stop:0.35 #241E36,
+                    stop:0.68 #6E334D,
+                    stop:0.88 #B85258,
+                    stop:1 #D9725E
                 );
                 {edge_border}
                 color: #CDD6F4;
                 font-family: 'Segoe UI', sans-serif;
             }}
             QLineEdit#OmniSearch {{
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:1 #332944
-                );
-                border: 1px solid #363A4F;
-                border-radius: 6px;
+                background-color: rgba(28, 20, 40, 150);
+                border: 1px solid rgba(250, 179, 135, 88);
+                border-radius: 7px;
                 padding: 6px 10px;
                 color: #CDD6F4;
                 font-size: 13px;
@@ -813,25 +944,20 @@ class SidebarWindow(QWidget):
             }}
             QLineEdit#OmniSearch:focus {{
                 border: 1px solid #FAB387;
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2E2B42, stop:1 #392B4A
-                );
+                background-color: rgba(36, 25, 50, 185);
             }}
             QPushButton#HeaderBtn, QPushButton#PillBtn {{
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #2A2D3E, stop:1 #342944
-                );
-                border: 1px solid #363A4F;
-                border-radius: 6px;
+                background-color: rgba(36, 25, 48, 155);
+                border: 1px solid rgba(250, 179, 135, 88);
+                border-radius: 7px;
                 color: #CDD6F4;
                 padding: 5px 8px;
                 font-size: 12px;
                 font-weight: 600;
             }}
             QPushButton#HeaderBtn:hover, QPushButton#PillBtn:hover {{
-                background-color: #363A4F;
+                background-color: rgba(74, 42, 74, 195);
+                border-color: #FAB387;
             }}
             QPushButton#HeaderBtn:focus, QPushButton#PillBtn:focus {{
                 border: 1px solid #FAB387;
@@ -860,12 +986,9 @@ class SidebarWindow(QWidget):
                 font-weight: 700;
             }}
             QListWidget {{
-                background-color: qlineargradient(
-                    x1:0, y1:0, x2:0.5, y2:1,
-                    stop:0 #2A2D3E, stop:1 #322944
-                );
-                border: 1px solid #363A4F;
-                border-radius: 6px;
+                background-color: rgba(24, 17, 36, 135);
+                border: 1px solid rgba(250, 179, 135, 88);
+                border-radius: 7px;
                 color: #CDD6F4;
                 padding: 4px;
             }}
@@ -1023,6 +1146,10 @@ class SidebarWindow(QWidget):
         self._load_panels()
         self.panel_transition = SunsetFadeOverlay(self.stack)
         root_layout.addWidget(self.stack, 1)
+
+        self.glass_overlay = InteractiveGlassOverlay(self)
+        self.glass_overlay.setGeometry(self.rect())
+        self.glass_overlay.raise_()
 
     def _load_panels(self) -> None:
         """Loads PanelHub and PanelQueue if built, or falls back to live test views."""
@@ -1565,6 +1692,139 @@ class SidebarWindow(QWidget):
             self.hide()
             self._is_closing = False
 
+    def update_hover_glass_pos(self, local_pos: QPointF | QPoint, active: bool = True) -> None:
+        """Updates the cursor-tracked interactive glass highlight and cloud illumination."""
+        pt = QPointF(local_pos)
+        self._target_hover_pos = pt
+        self._hover_pos = QPointF(
+            self._hover_pos.x() * 0.45 + pt.x() * 0.55,
+            self._hover_pos.y() * 0.45 + pt.y() * 0.55,
+        )
+        self._hover_active = bool(active)
+        self._hover_intensity = max(self._hover_intensity, 0.95) if active else 0.38
+        self.update()
+        if hasattr(self, "glass_overlay") and _qt_is_valid(self.glass_overlay):
+            self.glass_overlay.update()
+
+    def _on_backdrop_tick(self, value) -> None:
+        self._cloud_phase = float(value) % 1.0
+        target_intensity = 1.0 if self._hover_active else 0.38
+        self._hover_intensity += (target_intensity - self._hover_intensity) * 0.16
+        self._hover_pos = QPointF(
+            self._hover_pos.x() + (self._target_hover_pos.x() - self._hover_pos.x()) * 0.25,
+            self._hover_pos.y() + (self._target_hover_pos.y() - self._hover_pos.y()) * 0.25,
+        )
+        self.update()
+        if hasattr(self, "glass_overlay") and _qt_is_valid(self.glass_overlay):
+            self.glass_overlay.update()
+
+    def paintEvent(self, event) -> None:
+        w = float(self.width())
+        h = float(self.height())
+        if w <= 0.0 or h <= 0.0:
+            return
+
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+            # 1. Six-stop twilight-to-orange-pink sunset sky base gradient
+            sky = QLinearGradient(0.0, 0.0, w * 0.55, h)
+            sky.setColorAt(0.0, QColor("#181528"))
+            sky.setColorAt(0.24, QColor("#241E36"))
+            sky.setColorAt(0.5, QColor("#4A2644"))
+            sky.setColorAt(0.74, QColor("#7D3750"))
+            sky.setColorAt(0.9, QColor("#B95358"))
+            sky.setColorAt(1.0, QColor("#DE7A60"))
+            painter.fillRect(QRectF(0.0, 0.0, w, h), QBrush(sky))
+
+            # 2. Four drifting horizontal sunset cloud banks (orange-pink, coral-rose, golden-peach)
+            tau = 2.0 * math.pi
+            parallax_x = (self._hover_pos.x() - w * 0.5) * 0.04
+            parallax_y = (self._hover_pos.y() - h * 0.5) * 0.03
+            clouds = (
+                (0.26, 0.22, 0.92, 0.24, 0.0, QColor("#F38BA8"), 58),
+                (0.74, 0.44, 0.88, 0.26, 1.5, QColor("#FAB387"), 66),
+                (0.38, 0.68, 0.98, 0.28, 3.1, QColor("#FFA670"), 64),
+                (0.62, 0.88, 0.96, 0.24, 4.4, QColor("#F5C2E7"), 52),
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            for bx, by, rx_scale, ry_scale, offset, col, alpha in clouds:
+                cx = w * bx + math.sin(self._cloud_phase * tau + offset) * (w * 0.08) + parallax_x
+                cy = h * by + math.cos(self._cloud_phase * tau + offset) * (h * 0.03) + parallax_y
+                rx = max(90.0, w * rx_scale)
+                ry = max(54.0, h * ry_scale)
+
+                painter.save()
+                painter.translate(cx, cy)
+                painter.scale(1.0, ry / rx)
+                cloud_grad = QRadialGradient(0.0, 0.0, rx)
+                c_core = QColor(col)
+                c_core.setAlpha(alpha)
+                c_mid = QColor("#F9E2AF" if col == QColor("#FAB387") else col)
+                c_mid.setAlpha(int(alpha * 0.45))
+                c_edge = QColor(col)
+                c_edge.setAlpha(0)
+                cloud_grad.setColorAt(0.0, c_core)
+                cloud_grad.setColorAt(0.48, c_mid)
+                cloud_grad.setColorAt(1.0, c_edge)
+                painter.setBrush(QBrush(cloud_grad))
+                painter.drawEllipse(QPointF(0.0, 0.0), rx, rx)
+                painter.restore()
+
+            # 3. Cursor-tracked under-glass sunset radial spotlight
+            spot_r = max(140.0, min(240.0, w * 0.56))
+            spot_grad = QRadialGradient(self._hover_pos, spot_r)
+            s0 = QColor("#FFE8C6")
+            s0.setAlpha(int(round(78 * self._hover_intensity)))
+            s1 = QColor("#FAB387")
+            s1.setAlpha(int(round(52 * self._hover_intensity)))
+            s2 = QColor("#F38BA8")
+            s2.setAlpha(int(round(24 * self._hover_intensity)))
+            s3 = QColor("#F38BA8")
+            s3.setAlpha(0)
+            spot_grad.setColorAt(0.0, s0)
+            spot_grad.setColorAt(0.36, s1)
+            spot_grad.setColorAt(0.72, s2)
+            spot_grad.setColorAt(1.0, s3)
+            painter.setBrush(QBrush(spot_grad))
+            painter.drawEllipse(self._hover_pos, spot_r, spot_r)
+
+            # 4. Crisp 1px Sunset dock-edge hairline border
+            border_col = QColor("#FAB387")
+            border_col.setAlpha(140)
+            painter.setPen(QPen(border_col, 1.0))
+            edge = (self.dock_edge or "right").lower()
+            if edge == "left":
+                painter.drawLine(QPointF(w - 0.5, 0.0), QPointF(w - 0.5, h))
+            elif edge == "top":
+                painter.drawLine(QPointF(0.0, h - 0.5), QPointF(w, h - 0.5))
+            elif edge == "bottom":
+                painter.drawLine(QPointF(0.0, 0.5), QPointF(w, 0.5))
+            else:
+                painter.drawLine(QPointF(0.5, 0.0), QPointF(0.5, h))
+        finally:
+            painter.end()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if hasattr(self, "backdrop_anim") and self.backdrop_anim.state() != QVariantAnimation.State.Running:
+            self.backdrop_anim.start()
+        if hasattr(self, "glass_overlay") and _qt_is_valid(self.glass_overlay):
+            self.glass_overlay.setGeometry(self.rect())
+            self.glass_overlay.raise_()
+
+    def hideEvent(self, event) -> None:
+        if hasattr(self, "backdrop_anim") and self.backdrop_anim.state() != QVariantAnimation.State.Stopped:
+            self.backdrop_anim.stop()
+        super().hideEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "glass_overlay") and _qt_is_valid(self.glass_overlay):
+            self.glass_overlay.setGeometry(self.rect())
+            self.glass_overlay.raise_()
+
     # --- Panel & Profile Actions ---
     def switch_to_panel(self, index: int) -> None:
         clamped_idx = 1 if int(index) == 1 else 0
@@ -1753,51 +2013,65 @@ class SidebarWindow(QWidget):
             self.isVisible()
             and isinstance(obj, QWidget)
             and obj.window() is self
-            and isinstance(event, QKeyEvent)
         ):
-            if event.type() == QEvent.Type.ShortcutOverride:
-                if self._resolve_window_shortcut_action(event) is not None:
-                    event.accept()
-                    return True
-            elif event.type() == QEvent.Type.KeyPress and not event.isAutoRepeat():
-                action = self._resolve_window_shortcut_action(event)
-                if action is not None:
-                    action()
-                    event.accept()
-                    return True
-                if (
-                    event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
-                    and not (
-                        event.modifiers()
-                        & (
-                            Qt.KeyboardModifier.ControlModifier
-                            | Qt.KeyboardModifier.AltModifier
-                            | Qt.KeyboardModifier.ShiftModifier
-                        )
-                    )
-                ):
-                    focus_widget = QApplication.focusWidget()
+            etype = event.type()
+            if etype in (
+                QEvent.Type.MouseMove,
+                QEvent.Type.HoverMove,
+                QEvent.Type.Enter,
+            ):
+                gpos = (
+                    event.globalPosition().toPoint()
+                    if isinstance(event, QMouseEvent)
+                    else QCursor.pos()
+                )
+                self.update_hover_glass_pos(self.mapFromGlobal(gpos), active=True)
+            elif etype == QEvent.Type.Leave and obj is self:
+                self.update_hover_glass_pos(self._hover_pos, active=False)
+            elif isinstance(event, QKeyEvent):
+                if etype == QEvent.Type.ShortcutOverride:
+                    if self._resolve_window_shortcut_action(event) is not None:
+                        event.accept()
+                        return True
+                elif etype == QEvent.Type.KeyPress and not event.isAutoRepeat():
+                    action = self._resolve_window_shortcut_action(event)
+                    if action is not None:
+                        action()
+                        event.accept()
+                        return True
                     if (
-                        focus_widget is not None
-                        and obj is focus_widget
-                        and self.isAncestorOf(focus_widget)
-                        and focus_widget.window() is self
+                        event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                        and not (
+                            event.modifiers()
+                            & (
+                                Qt.KeyboardModifier.ControlModifier
+                                | Qt.KeyboardModifier.AltModifier
+                                | Qt.KeyboardModifier.ShiftModifier
+                            )
+                        )
                     ):
-                        if isinstance(focus_widget, QAbstractButton):
-                            if focus_widget.isEnabled():
-                                focus_widget.click()
-                            return True
-                        if isinstance(focus_widget, QComboBox):
-                            if focus_widget.isEnabled() and not focus_widget.isEditable():
-                                focus_widget.showPopup()
-                            return True
-                        if isinstance(focus_widget, QListWidget):
-                            item = focus_widget.currentItem()
-                            if item is not None:
-                                row_widget = focus_widget.itemWidget(item)
-                                if row_widget is not None and hasattr(row_widget, "checkbox"):
-                                    row_widget.checkbox.click()
-                                    return True
+                        focus_widget = QApplication.focusWidget()
+                        if (
+                            focus_widget is not None
+                            and obj is focus_widget
+                            and self.isAncestorOf(focus_widget)
+                            and focus_widget.window() is self
+                        ):
+                            if isinstance(focus_widget, QAbstractButton):
+                                if focus_widget.isEnabled():
+                                    focus_widget.click()
+                                return True
+                            if isinstance(focus_widget, QComboBox):
+                                if focus_widget.isEnabled() and not focus_widget.isEditable():
+                                    focus_widget.showPopup()
+                                return True
+                            if isinstance(focus_widget, QListWidget):
+                                item = focus_widget.currentItem()
+                                if item is not None:
+                                    row_widget = focus_widget.itemWidget(item)
+                                    if row_widget is not None and hasattr(row_widget, "checkbox"):
+                                        row_widget.checkbox.click()
+                                        return True
         return super().eventFilter(obj, event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -1938,6 +2212,8 @@ class SidebarWindow(QWidget):
         super().changeEvent(event)
 
     def closeEvent(self, event) -> None:
+        if hasattr(self, "backdrop_anim") and self.backdrop_anim.state() != QVariantAnimation.State.Stopped:
+            self.backdrop_anim.stop()
         if hasattr(self, "horizon_bar"):
             self.horizon_bar.stop()
         if hasattr(self, "_edge_drag_timer") and self._edge_drag_timer.isActive():
