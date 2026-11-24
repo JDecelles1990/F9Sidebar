@@ -698,3 +698,12 @@ class Win32HookManager(QObject):
         if src.hasImage():
             clone.setImageData(src.imageData())
         return clone
+
+
+def set_process_app_user_model_id(app_id: str = "F9Sidebar.App") -> bool:
+    """Assigns a dedicated Windows AppUserModelID so taskbar & dialogs group cleanly."""
+    try:
+        hr = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(str(app_id))
+        return int(hr) == 0
+    except Exception:
+        return False

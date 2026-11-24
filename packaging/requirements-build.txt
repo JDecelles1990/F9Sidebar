@@ -1,0 +1,2 @@
+# Build-only packaging dependencies (not required to run F9Sidebar from source)
+pyinstaller>=6.11.0

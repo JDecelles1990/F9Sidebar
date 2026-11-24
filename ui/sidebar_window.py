@@ -734,10 +734,13 @@ class SettingsDialog(QDialog):
         self.sidebar.flush_pending_state()
         chosen = file_path
         if chosen is None:
+            from database import get_default_export_dir
+
+            default_target = str(get_default_export_dir("Documents") / "F9Sidebar_backup.zip")
             chosen, _ = QFileDialog.getSaveFileName(
                 self,
                 "Export Workspace Backup",
-                "F9Sidebar_backup.zip",
+                default_target,
                 "Zip Archive (*.zip)",
             )
         if not chosen:

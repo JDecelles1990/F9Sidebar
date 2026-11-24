@@ -1,6 +1,9 @@
+from datetime import datetime
 import json
+import os
 from pathlib import Path
 import sys
+import traceback
 
 
 def _reexec_into_venv_if_needed() -> None:
@@ -31,14 +34,20 @@ try:
 except ImportError:  # pragma: no cover - Windows only
     winreg = None
 
-from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtGui import QAction, QActionGroup, QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 import qtawesome as qta
 
-from database import DatabaseManager, get_app_data_dir
+from database import (
+    APP_NAME,
+    APP_VERSION,
+    DatabaseManager,
+    get_app_data_dir,
+    get_resource_path,
+)
 from ui.sidebar_window import SidebarWindow
-from win32_hooks import Win32HookManager
+from win32_hooks import Win32HookManager, set_process_app_user_model_id
 
 SINGLE_INSTANCE_KEY = "F9Sidebar_SingleInstance_Lock"
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -100,19 +109,67 @@ def set_startup_enabled(enabled: bool) -> bool:
         return False
 
 
-def ensure_single_instance() -> QLocalServer | None:
+def _configure_frozen_stdio_and_logging() -> None:
+    """Prevents None-stream print crashes under console=False and logs fatal exceptions."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+    if not getattr(sys, "frozen", False):
+        return
+
+    orig_hook = sys.excepthook
+
+    def _log_unhandled(exc_type, exc_value, exc_tb) -> None:
+        try:
+            log_dir = get_app_data_dir() / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "f9sidebar.log"
+            if log_file.is_file() and log_file.stat().st_size > 512 * 1024:
+                log_file.write_text("", encoding="utf-8")
+            stamp = datetime.now().isoformat(timespec="seconds")
+            body = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+            with log_file.open("a", encoding="utf-8") as fh:
+                fh.write(f"[{stamp}] Unhandled exception:\n{body}\n")
+        except Exception:
+            pass
+        try:
+            orig_hook(exc_type, exc_value, exc_tb)
+        except Exception:
+            pass
+
+    sys.excepthook = _log_unhandled
+
+
+def load_app_icon() -> QIcon:
+    """Loads bundled Sunset Glass .ico asset if present, falling back to QtAwesome."""
+    ico_path = get_resource_path("assets/f9sidebar.ico")
+    if ico_path.is_file():
+        icon = QIcon(str(ico_path))
+        if not icon.isNull():
+            return icon
+    return qta.icon("fa5s.columns", color="#89B4FA")
+
+
+def ensure_single_instance(instance_key: str | None = None) -> QLocalServer | None:
     """If another instance is running, tells it to toggle open and exits."""
+    key = (
+        instance_key
+        or os.environ.get("F9SIDEBAR_INSTANCE_KEY", "").strip()
+        or SINGLE_INSTANCE_KEY
+    )
     socket = QLocalSocket()
-    socket.connectToServer(SINGLE_INSTANCE_KEY)
+    socket.connectToServer(key)
     if socket.waitForConnected(200):
         socket.write(b"TOGGLE")
         socket.waitForBytesWritten(200)
         socket.disconnectFromServer()
         return None
 
-    QLocalServer.removeServer(SINGLE_INSTANCE_KEY)
+    QLocalServer.removeServer(key)
     server = QLocalServer()
-    server.listen(SINGLE_INSTANCE_KEY)
+    server.listen(key)
     return server
 
 
@@ -142,8 +199,17 @@ def launch_initial_sidebar_state(sidebar: SidebarWindow) -> None:
 
 
 def main() -> int:
+    _configure_frozen_stdio_and_logging()
+    set_process_app_user_model_id("F9Sidebar.App")
+
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
     app.setQuitOnLastWindowClosed(False)
+
+    app_icon = load_app_icon()
+    app.setWindowIcon(app_icon)
 
     server = ensure_single_instance()
     if server is None:
@@ -175,7 +241,7 @@ def main() -> int:
     server.newConnection.connect(on_new_connection)
 
     # System Tray Icon & Menu
-    tray = QSystemTrayIcon(qta.icon("fa5s.columns", color="#89B4FA"), app)
+    tray = QSystemTrayIcon(app_icon, app)
     tray.setToolTip(
         "F9Sidebar (F9: Toggle | Ctrl+F9: Clip | Ctrl+Alt+F9: Paste Last | Shift+F9: Panel | Ctrl+Shift+F9: Pin)"
     )

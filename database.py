@@ -9,10 +9,36 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+APP_NAME = "F9Sidebar"
+APP_VERSION = "0.1.0"
+
+
+def _is_writable_dir_candidate(target_dir: Path) -> bool:
+    """Checks whether target_dir (or its existing parent) accepts file writes."""
+    probe_root = target_dir if target_dir.exists() else target_dir.parent
+    if not probe_root.exists():
+        return True
+    probe_file = probe_root / f".f9s_write_probe_{os.getpid()}"
+    try:
+        probe_file.write_bytes(b"")
+        probe_file.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def get_app_data_dir() -> Path:
     """Resolve the writable data directory for dev and frozen .exe modes."""
+    env_override = os.environ.get("F9SIDEBAR_DATA_DIR", "").strip()
+    if env_override:
+        return Path(env_override).expanduser().resolve()
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / "data"
+        portable_dir = Path(sys.executable).resolve().parent / "data"
+        if _is_writable_dir_candidate(portable_dir):
+            return portable_dir
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        base = Path(local_app_data) if local_app_data else Path.home()
+        return base / APP_NAME / "data"
     return Path(__file__).resolve().parent / "data"
 
 
@@ -20,6 +46,16 @@ def get_resource_path(relative_path: str) -> Path:
     """Resolve read-only bundled asset paths for dev and frozen .exe modes."""
     base_path = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return base_path / relative_path
+
+
+def get_default_export_dir(preferred: str = "Documents") -> Path:
+    """Returns a user-writable default directory for Save dialogs (never System32)."""
+    home = Path.home()
+    if preferred:
+        candidate = home / preferred
+        if candidate.is_dir():
+            return candidate
+    return home
 
 
 DEFAULT_NOTE_TABS = [

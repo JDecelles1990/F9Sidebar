@@ -9,7 +9,11 @@ env/
 # Packaging
 build/
 dist/
+release/
 *.egg-info/
+*.exe
+*.zip
+/*.spec
 
 # Local runtime data (SQLite DBs, backups, cached favicons)
 data/

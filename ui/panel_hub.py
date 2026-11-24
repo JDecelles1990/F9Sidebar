@@ -5404,11 +5404,14 @@ class ImageEditDialog(QDialog):
     def export_image_to_file(self, file_path: Optional[str] = None) -> bool:
         chosen = file_path
         if chosen is None:
+            from database import get_default_export_dir
+
             default_name = f"F9S_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png"
+            default_target = str(get_default_export_dir("Pictures") / default_name)
             chosen, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save Edited Image",
-                default_name,
+                default_target,
                 "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;WebP (*.webp);;BMP (*.bmp)",
             )
         if not chosen:
@@ -8230,6 +8233,17 @@ class PanelHub(QWidget):
         if not cleaned:
             return ""
         tmp_path: Optional[str] = None
+        no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            cur_cwd = Path.cwd().resolve()
+        except OSError:
+            cur_cwd = Path.home()
+        cwd_lower = str(cur_cwd).lower()
+        safe_cwd = (
+            str(Path.home())
+            if ("\\windows\\system32" in cwd_lower or cwd_lower.endswith("\\_internal"))
+            else str(cur_cwd)
+        )
         try:
             if "\n" in cleaned:
                 with tempfile.NamedTemporaryFile(
@@ -8242,6 +8256,8 @@ class PanelHub(QWidget):
                     capture_output=True,
                     text=True,
                     timeout=10,
+                    cwd=safe_cwd,
+                    creationflags=no_window,
                 )
             else:
                 proc = subprocess.run(
@@ -8250,6 +8266,8 @@ class PanelHub(QWidget):
                     capture_output=True,
                     text=True,
                     timeout=10,
+                    cwd=safe_cwd,
+                    creationflags=no_window,
                 )
             combined = "\n".join(
                 part.rstrip()
@@ -8392,14 +8410,17 @@ class PanelHub(QWidget):
         self.flush_pending_save()
         chosen = file_path
         if chosen is None:
+            from database import get_default_export_dir
+
             default_name = f"{(self.lbl_note_tab.text() or 'note').strip()}.md"
+            default_target = str(get_default_export_dir("Documents") / default_name)
 
             def _pick() -> None:
                 nonlocal chosen
                 chosen, _ = QFileDialog.getSaveFileName(
                     self,
                     "Export Note",
-                    default_name,
+                    default_target,
                     "Markdown (*.md);;HTML (*.html);;Text (*.txt)",
                 )
 
